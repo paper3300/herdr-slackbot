@@ -13,6 +13,20 @@ Slack DM ──(Socket Mode)──> herdr-slackbot 브리지 ──(named pipe)�
             (공개 URL 불필요)   (Herdr 워크스페이스 herdr-slack의 pane에서 실행)
 ```
 
+## 스크린샷
+
+**Home 탭:** 봇을 열면 PC의 에이전트가 워크스페이스별로 보입니다. 각 줄에는 상태 이모지 · 이름/pane · 종류 · 상태 · 터미널 제목이 표시됩니다. 위쪽 버튼으로 새 에이전트를 띄우거나 프롬프트를 보낼 수 있고, idle/done인 에이전트는 줄마다 있는 **[보내기]**로 바로 보낼 수 있습니다.
+
+![Home 탭: 워크스페이스별 에이전트 목록과 새 에이전트 / 보내기 / 새로고침 버튼](docs/images/home-tab.png)
+
+**새 에이전트 (`/herdr new`, [➕ 새 에이전트]):** 고른 워크스페이스에 새 탭을 만들고 에이전트를 시작합니다. 모델·effort·권한 모드를 고를 수 있고, 기본값은 Opus · high · auto입니다. 이름을 비우면 `slack-<N>`이 붙습니다.
+
+![새 에이전트 모달: Model, Effort, Permission mode, Name, Prompt 입력](docs/images/new-agent-modal.png)
+
+**보내기 (`/herdr send`, [📤 보내기]):** 실행 중인 에이전트를 골라 프롬프트를 보냅니다. 에이전트를 고르면 그 에이전트의 마지막 응답이 모달에 표시됩니다. 작업 결과는 에이전트별 DM 스레드로 옵니다.
+
+![보내기 모달: Agent 선택과 Prompt 입력](docs/images/send-modal.png)
+
 ## 빠른 시작
 
 1. **준비물:** Windows 10/11, **Herdr 0.8.2 이상**, **Python 3.11 이상**. Python이 없으면 먼저 설치합니다.
