@@ -1,0 +1,50 @@
+  ├────────────────┼─────────────────────────┼──────────┤
+  │ Threading      │ Per agent session       │ D7-D11   │
+  ├────────────────┼─────────────────────────┼──────────┤
+  │ Result Parsing │ Claude + Codex fallback │ D10      │
+  └────────────────┴─────────────────────────┴──────────┘
+
+  5. Thread Organization & Notifications
+
+  - Each agent maintains exactly one DM thread bound to its agent_session id (not pane), created on first notification
+  - Slack-sent confirmation message serves as thread root; replies include "⏳ started (working)" status update and final result upon completion
+  - Agent state changes trigger immediate DM replies without timeout; completion detection uses event subscriptions
+  - Mute controls ([🔕 mute] button) per agent thread allow selective notification suppression, persisted in state
+  - PC-originated agents notify only on working → done transitions (skipping working → idle), while Slack-originated tasks always receive completion replies
+
+  6. Result Display & Content Handling
+
+  - Agent output is retrieved via herdr agent read <target> --source recent-unwrapped --lines 200, with trailing blank lines stripped
+  - Claude results are parsed by identifying the echoed prompt line, extracting content between the prompt echo and the completion marker (✻), and capturing the last ● block
+  - Fallback parsing (codex or parse failures) uses raw last N non-blank lines (e.g., 40 lines)
+  - Content exceeding 3000 characters is truncated with a [전체 보기] (View Full) button that uploads the complete result as a markdown file
+  - Result headers display: ✅ <name> · <workspace label> · <duration> plus context (cwd, terminal title); blocked states show ⚠️ prefix with "needs confirmation" note
+
+  7. Bridge Runtime & Infrastructure
+
+  - The bridge process runs in a dedicated Herdr workspace named herdr-slack, created automatically by plugin startup hooks if absent
+  - Single-instance enforcement via lock file in STATE_DIR prevents duplicate bridge instances
+  - Configuration stored in .env under HERDR_PLUGIN_CONFIG_DIR (obtained via herdr plugin config-dir <id>)
+  - Herdr plugin actions and key bindings (if supported) enable restart and status commands accessible from the desktop
+  - Logging writes to STATE_DIR log file and stdout with no sensitive credentials exposed
+
+  8. Security, Setup & Distribution
+
+  - Per-user Slack app configuration uses a manifest (YAML/JSON) generated with the user's slash command name, bot display name, Socket Mode enabled, and required scopes
+    (chat:write, commands, im:history, im:write, files:write, users:read)
+  - Bridge validates all incoming commands, actions, views, and messages against SLACK_OWNER_USER_ID; non-owner requests are ignored or rejected
+  - User creates the Slack app from manifest and provides SLACK_BOT_TOKEN (xoxb) and SLACK_APP_TOKEN (xapp) in .env
+  - Slack transport is isolated behind an interface for future extension to relay hubs
+  - Project structure follows: herdr_slackbot/ package with modules for config, Herdr client, events, state, parsing, Slack app, blocks, and orchestration
+
+  # Example: Starting a new agent
+  herdr agent start slack-42 --kind claude --pane <root_pane_id> -- --model opus --effort high --permission-mode auto
+  herdr agent prompt slack-42 "Analyze the repository structure"
+
+✻ Churned for 23s · done 오전 11:29
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ create the project structure
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Haiku 4.5 | Context 24% | Week 1%
+  ⏸ manual mode on · ← for agents

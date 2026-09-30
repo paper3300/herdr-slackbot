@@ -1,0 +1,50 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ✨ Update available! 0.159.0 -> 0.159.2                                                                                              │
+│ Run powershell -ExecutionPolicy Bypass -c '$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex' to update. │
+│                                                                                                                                      │
+│ See full release notes:                                                                                                              │
+│ https://github.com/openai/codex/releases/latest                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+  >_ OpenAI Codex (v0.159.0)
+     D:\Git\herdr-slackbot
+
+  A half-formed idea will do.
+
+
+› short bullet points: what is a named pipe on Windows
+
+
+• • A named pipe is a Windows communication channel that lets two processes exchange data, even if they’re running as different users or on different computers.
+  • One process creates and listens on the pipe; another connects to it.
+  • It has a name such as \\.\pipe\my-app.
+  • Apps commonly use named pipes for local client–server communication. Windows can control who is allowed to connect.
+
+  Worked for 14s • 11:33 AM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+› Ask Codex to do anything
+
+  GPT-6-Sol high · weekly 80% left · Context 2% used
+  ← for agents · ? for shortcuts                                                                                                                           ⚠ 1 warning · f2 to view

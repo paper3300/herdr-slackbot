@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "herdr-slackbot"
+version = "0.1.0"
+description = "Herdr plugin that bridges a Slack bot DM to the local Herdr session"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+    "slack_bolt>=1.18",
+    "slack_sdk>=3.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+herdr-slackbot = "herdr_slackbot.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["herdr_slackbot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: talks to the running Herdr server (opt-in via HERDR_LIVE_TESTS=1)",
+]
