@@ -284,14 +284,31 @@ def last_answer(session_id: str, cwd: str | None, since: float | None = None,
 
 
 # --- conversation history (send modal) ---------------------------------------------------
+#
+# Extra record shapes used here (not by `evaluate_lines`):
+# - queued prompt (typed while the agent works): {"type": "attachment", "attachment":
+#   {"type": "queued_command", "commandMode": "prompt", "prompt": "<text>" | [blocks], "source_uuid"?}}
+# - background task notification: a "user" record with origin.kind "task-notification" /
+#   promptSource "system", text "<task-notification>...<summary>..</summary>...</task-notification>"
+# - compact summary: a "user" record with isCompactSummary / isVisibleInTranscriptOnly
+# - bash mode: "user" records whose text is <bash-input>/<bash-stdout>/<bash-stderr>
+# - tree links: uuid, parentUuid (logicalParentUuid across a compact boundary)
 
 CONVERSATION_TAIL_BYTES = 4 * 1024 * 1024
-_REMINDER_RE = re.compile(r"<system-reminder>.*?(</system-reminder>|\Z)", re.S)
+_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)  # closed blocks only
+_BASH_PREFIXES = ("<bash-input>", "<bash-stdout>", "<bash-stderr>")
+_TASK_NOTIFICATION = "<task-notification>"
+_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.S)
+TASK_EVENT = "Background task finished"
+SYSTEM_EVENT = "System message"
+COMPACT_EVENT = "Conversation compacted (earlier messages summarized)"
+EVENT_MAX = 200
+_LINKED_TYPES = ("user", "assistant", "attachment")
 
 
 @dataclass(frozen=True)
 class Turn:
-    role: str  # "user" | "assistant"
+    role: str  # "user" | "assistant" | "event" (a turn not started by the owner: task notification ...)
     text: str
     at: float | None
 
@@ -302,19 +319,96 @@ class Conversation:
     truncated: bool  # the tail read started mid-file: older messages are missing
 
 
-def _prompt_text(entry: dict) -> str:
-    """A prompt's visible text: text blocks (system reminders and command bookkeeping removed),
-    images as `[image]`."""
-    parts = []
-    for block in _blocks(entry):
+@dataclass
+class _Start:
+    index: int
+    role: str  # "user" | "event"
+    text: str
+    show_head: bool = True
+    show_answer: bool = True
+
+
+def _texts(entry: dict) -> list[str]:
+    return [str(b.get("text", "")) for b in _blocks(entry) if b.get("type") == "text"]
+
+
+def _prompt_text(blocks: list) -> str:
+    """Visible text of prompt blocks: closed system-reminder blocks and command bookkeeping removed,
+    images as `[image]`. Falls back to the raw text if nothing is left (stripping never hides a turn)."""
+    parts, raw = [], []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
         kind = block.get("type")
         if kind == "image":
             parts.append("[image]")
+            raw.append("[image]")
         elif kind == "text":
-            text = _REMINDER_RE.sub("", str(block.get("text", ""))).strip()
+            original = str(block.get("text", ""))
+            raw.append(original.strip())
+            text = _REMINDER_RE.sub("", original).strip()
             if text and not text.startswith(_COMMAND_PREFIXES):
                 parts.append(text)
-    return "\n\n".join(parts)
+    return "\n\n".join(parts) or "\n\n".join(r for r in raw if r)
+
+
+def _reminder_only(entry: dict) -> bool:
+    """Every block is text made solely of closed <system-reminder> blocks (an injected note)."""
+    blocks = _blocks(entry)
+    return bool(blocks) and all(
+        b.get("type") == "text" and _REMINDER_RE.search(str(b.get("text", "")))
+        and not _REMINDER_RE.sub("", str(b.get("text", ""))).strip() for b in blocks)
+
+
+def _queued_prompt(entry: dict) -> list | None:
+    """Blocks of a prompt queued while the agent was working, else None."""
+    if entry.get("type") != "attachment" or entry.get("isMeta"):
+        return None
+    att = entry.get("attachment")
+    if not isinstance(att, dict) or att.get("type") != "queued_command" or att.get("commandMode") != "prompt":
+        return None
+    prompt = att.get("prompt")
+    if isinstance(prompt, str):
+        return [{"type": "text", "text": prompt}] if prompt.strip() else None
+    if isinstance(prompt, list):
+        blocks = [b for b in prompt if isinstance(b, dict) and b.get("type") in ("text", "image")]
+        return blocks or None
+    return None
+
+
+def _event_text(entry: dict) -> str | None:
+    """Label for a "user" record that starts a turn but was not written by the owner, else None."""
+    if entry.get("isCompactSummary") or entry.get("isVisibleInTranscriptOnly"):
+        return COMPACT_EVENT
+    origin = entry.get("origin")
+    texts = _texts(entry)
+    if (isinstance(origin, dict) and origin.get("kind") == "task-notification") or \
+            any(t.lstrip().startswith(_TASK_NOTIFICATION) for t in texts):
+        summary = next((" ".join(m.group(1).split()) for t in texts for m in [_SUMMARY_RE.search(t)] if m), "")
+        if len(summary) > EVENT_MAX:
+            summary = summary[:EVENT_MAX - 1] + "…"
+        return f"{TASK_EVENT}: {summary}" if summary else TASK_EVENT
+    if entry.get("promptSource") == "system":
+        return SYSTEM_EVENT
+    return None
+
+
+def _is_bash_mode(entry: dict) -> bool:
+    texts = [t.lstrip() for t in _texts(entry)]
+    return bool(texts) and all(t.startswith(_BASH_PREFIXES) for t in texts)
+
+
+def _turn_start(index: int, entry: dict) -> _Start | None:
+    """A typed prompt, a queued prompt or a non-owner event (task notification, compact summary)."""
+    queued = _queued_prompt(entry)
+    if queued is not None:
+        return _Start(index, "user", _prompt_text(queued))
+    if not _is_prompt(entry) or _reminder_only(entry) or _is_bash_mode(entry):
+        return None
+    event = _event_text(entry)
+    if event is not None:
+        return _Start(index, "event", event)
+    return _Start(index, "user", _prompt_text(_blocks(entry)))
 
 
 def _final_text(turn: list[dict], last: bool) -> tuple[str, float | None] | None:
@@ -341,19 +435,89 @@ def _final_text(turn: list[dict], last: bool) -> tuple[str, float | None] | None
     return (text, _ts(final[-1])) if text else None
 
 
-def conversation_from_lines(lines: Iterable[str]) -> list[Turn]:
-    """User prompts and the agent's final answers, oldest first. Tool calls/results, thinking,
-    meta/command records, interrupts and sidechains are left out; an unanswered or interrupted
-    prompt has no assistant entry. Records before the first prompt (a cut-off tail) are dropped."""
+def _live_branch(entries: list[dict], starts: list[_Start], tail_cut: bool) -> set[str] | None:
+    """uuids on the parentUuid (logicalParentUuid where parentUuid is null) chain of the latest
+    user/assistant record: the live branch after a rewind or an edited prompt. None (= linear order)
+    whenever the chain cannot be trusted: a linked record without uuid, a cycle, a parent missing
+    from the tail (accepted only when the tail was cut and no turn starts before that point)."""
+    linked = [e for e in entries if e.get("type") in _LINKED_TYPES]
+    if not linked or any(not isinstance(e.get("uuid"), str) or not e["uuid"] for e in linked):
+        return None
+    index = {e["uuid"]: i for i, e in enumerate(entries) if isinstance(e.get("uuid"), str)}
+    tip = next((e for e in reversed(entries) if e.get("type") in ("user", "assistant")), None)
+    if tip is None:
+        return None
+    on: set[str] = set()
+    uuid = tip["uuid"]
+    while True:
+        if uuid in on:
+            return None  # cycle
+        on.add(uuid)
+        entry = entries[index[uuid]]
+        parent = entry.get("parentUuid")
+        if parent is None:
+            parent = entry.get("logicalParentUuid")
+        if parent is None:
+            return on  # the root
+        if not isinstance(parent, str) or parent not in index:
+            if isinstance(parent, str) and tail_cut and all(s.index > index[uuid] for s in starts):
+                return on  # the chain leaves the cut tail before its first turn
+            return None  # broken inside the tail
+        uuid = parent
+
+
+def _mark_abandoned(entries: list[dict], starts: list[_Start], live: set[str]) -> None:
+    """Typed prompts off the live branch are hidden with their answer. Their records still end the
+    previous turn, so an abandoned answer never shows up under a live prompt. Queued prompts and
+    events are always kept (their place in the tree is not relied on)."""
+    for start in starts:
+        entry = entries[start.index]
+        if start.role == "user" and entry.get("type") == "user" and entry["uuid"] not in live:
+            start.show_head = start.show_answer = False
+
+
+def _mark_duplicates(entries: list[dict], starts: list[_Start]) -> None:
+    """A queued prompt that also exists as a "user" record (same text, linked by source_uuid): the
+    later copy is not shown again; its answer still is."""
+    seen: dict[str, str] = {}
+    for start in starts:
+        if start.role != "user" or not start.show_head:
+            continue
+        entry = entries[start.index]
+        att = entry.get("attachment") if entry.get("type") == "attachment" else None
+        ids = {x for x in ((att or {}).get("source_uuid"), entry.get("uuid"), entry.get("source_uuid"),
+                           entry.get("sourceUuid")) if isinstance(x, str) and x}
+        if any(seen.get(x) == start.text for x in ids):
+            start.show_head = False
+            continue
+        for x in ids:
+            seen.setdefault(x, start.text)
+
+
+def conversation_from_lines(lines: Iterable[str], tail_cut: bool = False) -> list[Turn]:
+    """Prompts (typed, or queued while the agent worked), turn events (background task finished,
+    compaction) and the agent's final answers, oldest first. Each queued prompt starts its own
+    sub-turn, so an interrupt only drops that sub-turn's answer. Tool calls/results, thinking,
+    meta/command/bash-mode records, interrupts and sidechains are left out; an unanswered prompt has
+    no assistant entry. Records before the first turn are dropped. Prompts on an abandoned branch
+    are hidden when the parentUuid tree in the tail is intact (`tail_cut`: the tail starts mid-file)."""
     entries, _ = _decode(lines)
     entries = [e for e in entries if _well_formed(e)]
-    # a prompt record carrying only a system reminder / command output does not start a turn
-    starts = [i for i, e in enumerate(entries) if _is_prompt(e) and _prompt_text(e)]
+    starts = [s for s in (_turn_start(i, e) for i, e in enumerate(entries)) if s is not None]
+    if not starts:
+        return []
+    live = _live_branch(entries, starts, tail_cut)
+    if live is not None:
+        _mark_abandoned(entries, starts, live)
+    _mark_duplicates(entries, starts)
     turns: list[Turn] = []
     for n, start in enumerate(starts):
-        turns.append(Turn("user", _prompt_text(entries[start]), _ts(entries[start])))
-        end = starts[n + 1] if n + 1 < len(starts) else len(entries)
-        answer = _final_text(entries[start + 1:end], last=n + 1 == len(starts))
+        if start.show_head:
+            turns.append(Turn(start.role, start.text, _ts(entries[start.index])))
+        if not start.show_answer:
+            continue
+        end = starts[n + 1].index if n + 1 < len(starts) else len(entries)
+        answer = _final_text(entries[start.index + 1:end], last=n + 1 == len(starts))
         if answer is not None:
             turns.append(Turn("assistant", answer[0], answer[1]))
     return turns
@@ -367,7 +531,7 @@ def conversation(session_id: str, cwd: str | None, base: Path | None = None,
         return None
     try:
         lines, _, cut = _read_tail(path, max_bytes)
-        return Conversation(conversation_from_lines(lines), cut)
+        return Conversation(conversation_from_lines(lines, tail_cut=cut), cut)
     except OSError as exc:
         log.warning("cannot read %s: %s", path, exc)
     except (TypeError, ValueError, AttributeError, KeyError) as exc:

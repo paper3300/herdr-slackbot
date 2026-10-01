@@ -248,3 +248,169 @@ def test_empty_or_broken_transcript_falls_back(env, monkeypatch):
     import herdr_slackbot.bridge as bridge_mod
     monkeypatch.setattr(bridge_mod, "claude_conversation", broken)
     assert env.bridge.preview_blocks(agent)[0]["block_id"] == B.BLOCK_PREVIEW_HEAD
+
+
+# --- review fixes (docs/review/history-en.md) ---------------------------------------------------
+
+def queued(prompt, n, mode="prompt", **extra):
+    return {"type": "attachment", "timestamp": _ts(n),
+            "attachment": {"type": "queued_command", "commandMode": mode, "prompt": prompt, **extra}}
+
+
+def _pairs(entries, **kw):
+    return [(t.role, t.text) for t in conversation_from_lines(_lines(entries), **kw)]
+
+
+def test_h1_prompt_queued_while_working_starts_its_own_sub_turn():
+    entries = [user("first question", 1), assistant("m1", [tool_use(1)], "tool_use", 2), user([tool_result(1)], 3),
+               queued("also do Y", 4), assistant("m2", [text("did X and Y")], "end_turn", 5)]
+    assert _pairs(entries) == [("user", "first question"), ("user", "also do Y"), ("assistant", "did X and Y")]
+
+
+def test_h1_interrupt_before_a_queued_prompt_only_drops_that_sub_turn():
+    entries = [user("run the tests", 1), assistant("m1", [tool_use(1)], "tool_use", 2), user([tool_result(1)], 3),
+               user([text("[Request interrupted by user]")], 4), queued("revert the migration instead", 5),
+               assistant("m2", [text("Reverted it.")], "end_turn", 6)]
+    assert _pairs(entries) == [("user", "run the tests"), ("user", "revert the migration instead"),
+                               ("assistant", "Reverted it.")]
+
+
+def test_h1_queued_block_prompt_other_modes_and_duplicates():
+    blocks = [{"type": "image", "source": {}}, text("this one")]
+    entries = [user("q", 1), assistant("m0", [text("a")], "end_turn", 2),
+               queued("notification text", 3, mode="task-notification"),  # not a prompt
+               queued(blocks, 4), assistant("m1", [text("seen")], "end_turn", 5)]
+    assert _pairs(entries) == [("user", "q"), ("assistant", "a"), ("user", "[image]\n\nthis one"),
+                               ("assistant", "seen")]
+    dup = [user("q", 1), assistant("m1", [tool_use(1)], "tool_use", 2), queued("again", 3, source_uuid="u-src"),
+           assistant("m2", [text("first")], "end_turn", 4),
+           user("again", 5, uuid="u-src"), assistant("m3", [text("second")], "end_turn", 6)]
+    assert _pairs(dup) == [("user", "q"), ("user", "again"), ("assistant", "first"), ("assistant", "second")]
+
+
+TASK_NOTE = ("<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n"
+             "<summary>Background command 'build' completed</summary>\n</task-notification>")
+
+
+def test_h2_task_notification_is_an_event_not_a_prompt():
+    entries = [user("start the build in the background", 1), assistant("m1", [text("Started.")], "end_turn", 2),
+               user(TASK_NOTE, 3, origin={"kind": "task-notification"}, promptSource="system"),
+               assistant("m2", [text("The build passed.")], "end_turn", 4)]
+    assert _pairs(entries) == [("user", "start the build in the background"), ("assistant", "Started."),
+                               ("event", "Background task finished: Background command 'build' completed"),
+                               ("assistant", "The build passed.")]
+    older = [user("go", 1), assistant("m1", [text("ok")], "end_turn", 2),
+             user("<task-notification>x</task-notification>", 3)]
+    assert _pairs(older)[-1] == ("event", "Background task finished")  # tag fallback, no summary
+    system = [user("go", 1), user("injected", 2, promptSource="system")]
+    assert _pairs(system)[-1] == ("event", "System message")
+
+
+def test_h2_event_renders_as_one_line_without_raw_tags():
+    turns = conversation_from_lines(_lines([user(TASK_NOTE, 3, origin={"kind": "task-notification"}),
+                                            assistant("m2", [text("The build passed.")], "end_turn", 4)]))
+    blocks = B.conversation_blocks(turns, "coder", 1_790_000_000.0)
+    texts = _texts(blocks)
+    assert texts[0].startswith("⚙️ _Background task finished: Background command 'build' completed_")
+    assert not any("You" in t or "task-id" in t or "&lt;" in t for t in texts)
+    assert blocks[0]["type"] == "context" and texts[-1] == "The build passed."
+
+
+def test_h2_events_count_one_block_in_the_budget():
+    turns = [Turn("event", "Background task finished", float(i)) for i in range(100)]
+    blocks = B.conversation_blocks(turns, "c", 200.0)
+    assert len(blocks) == B.PREVIEW_MAX_BLOCKS and "61 earlier messages not shown" in _texts(blocks)[0]
+
+
+def test_n1_compact_summary_and_bash_mode_are_not_owner_prompts():
+    from herdr_slackbot.claude_session import COMPACT_EVENT
+    entries = [user("This session is being continued from a previous conversation. Summary: ...", 1,
+                    isCompactSummary=True, isVisibleInTranscriptOnly=True),
+               assistant("m1", [text("Continuing.")], "end_turn", 2),
+               user("<bash-input>git status</bash-input>", 3),
+               user("<bash-stdout>clean</bash-stdout><bash-stderr></bash-stderr>", 4),
+               user("thanks", 5), assistant("m2", [text("np")], "end_turn", 6)]
+    assert _pairs(entries) == [("event", COMPACT_EVENT), ("assistant", "Continuing."),
+                               ("user", "thanks"), ("assistant", "np")]
+
+
+def test_n2_unclosed_reminder_tag_in_a_prompt_is_kept():
+    entries = [user("q1", 1), assistant("m1", [text("a1")], "end_turn", 2),
+               user("<system-reminder> tags: why do they appear?", 3), assistant("m2", [text("a2")], "end_turn", 4),
+               user("why does `<system-reminder>` appear?", 5), assistant("m3", [text("a3")], "end_turn", 6),
+               user([text("real"), text("<system-reminder>note</system-reminder>")], 7),
+               user("<system-reminder>only a note</system-reminder>", 8),  # injected: not a new turn
+               assistant("m4", [text("a4")], "end_turn", 9)]
+    assert _pairs(entries) == [("user", "q1"), ("assistant", "a1"),
+                               ("user", "<system-reminder> tags: why do they appear?"), ("assistant", "a2"),
+                               ("user", "why does `<system-reminder>` appear?"), ("assistant", "a3"),
+                               ("user", "real"), ("assistant", "a4")]
+
+
+def _linked(entries):
+    """Give entries uuids u0.. and a linear parentUuid chain."""
+    out, prev = [], None
+    for i, e in enumerate(entries):
+        e = dict(e, uuid=f"u{i}", parentUuid=prev)
+        prev = e["uuid"]
+        out.append(e)
+    return out
+
+
+def _rewound():
+    # P1 -> A1 -> P2 -> A2 (abandoned), then P2 edited: P2' from A1 -> A2'
+    return [user("P1", 1, uuid="p1", parentUuid=None),
+            assistant("a1", [text("A1")], "end_turn", 2, uuid="a1", parentUuid="p1"),
+            user("P2 old", 3, uuid="p2", parentUuid="a1"),
+            assistant("a2", [text("A2 old")], "end_turn", 4, uuid="a2", parentUuid="p2"),
+            user("P2 new", 5, uuid="p3", parentUuid="a1"),
+            assistant("a3", [text("A2 new")], "end_turn", 6, uuid="a3", parentUuid="p3")]
+
+
+LIVE = [("user", "P1"), ("assistant", "A1"), ("user", "P2 new"), ("assistant", "A2 new")]
+LINEAR = [("user", "P1"), ("assistant", "A1"), ("user", "P2 old"), ("assistant", "A2 old"),
+          ("user", "P2 new"), ("assistant", "A2 new")]
+
+
+def test_n3_abandoned_branch_is_hidden():
+    assert _pairs(_rewound()) == LIVE
+    compacted = _rewound()[:4] + [  # a compact boundary links through logicalParentUuid
+        {"type": "system", "subtype": "compact_boundary", "uuid": "cb", "parentUuid": None, "logicalParentUuid": "a1"},
+        user("P2 new", 5, uuid="p3", parentUuid="cb"),
+        assistant("a3", [text("A2 new")], "end_turn", 6, uuid="a3", parentUuid="p3")]
+    assert _pairs(compacted) == LIVE
+
+
+def test_n3_untrusted_chain_falls_back_to_linear_order():
+    broken = _rewound()
+    broken[4] = dict(broken[4], parentUuid="gone")  # parent missing inside a complete file
+    assert _pairs(broken) == LINEAR
+    assert _pairs(broken, tail_cut=True) == LINEAR  # turns exist before the break
+    no_uuid = _rewound()
+    del no_uuid[3]["uuid"]
+    assert _pairs(no_uuid) == LINEAR
+    cycle = _rewound()
+    cycle[0] = dict(cycle[0], parentUuid="a3")
+    assert _pairs(cycle) == LINEAR
+
+
+def test_n3_cut_tail_where_the_chain_leaves_before_the_first_turn():
+    entries = [assistant("a0", [text("old tail")], "end_turn", 0, uuid="a0", parentUuid="before-tail")] + _rewound()
+    entries[1] = dict(entries[1], parentUuid="a0")
+    assert _pairs(entries, tail_cut=True) == LIVE
+    assert _pairs(entries) == LINEAR  # a complete file: the missing parent is a real break
+
+
+def test_n3_linked_records_keep_queued_prompts_and_events():
+    entries = _linked([user("q", 1), assistant("m1", [tool_use(1)], "tool_use", 2), queued("more", 3),
+                       assistant("m2", [text("done")], "end_turn", 4),
+                       user(TASK_NOTE, 5, origin={"kind": "task-notification"}),
+                       assistant("m3", [text("noted")], "end_turn", 6)])
+    assert [r for r, _ in _pairs(entries)] == ["user", "user", "assistant", "event", "assistant"]
+
+
+def test_n4_english_readme_has_no_korean_ui_text():
+    import re
+    readme = (Path(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
+    hangul = set(re.findall("[가-힣]+", readme))
+    assert hangul <= {"한국어"}, hangul  # only the language link

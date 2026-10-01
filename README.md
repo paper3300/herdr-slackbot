@@ -284,7 +284,7 @@ Open the bot from the **Apps** list in Slack's sidebar and click the **Home** ta
   - **[🔄 Refresh]**: redraws immediately.
 - **Below:** Agents by workspace (status emoji · name/pane · kind · status · terminal title). The **[Send]** button on an idle/done agent's row opens the send modal with that agent preselected.
 - **Auto refresh:** Redrawn every time you open Home. After you've opened it once, it also refreshes when agent status changes, batched to at most once every 5 seconds.
-- **Display limit:** Up to 100 blocks per view; the rest are collapsed into "외 N개" (N more).
+- **Display limit:** Up to 100 blocks per view; the rest are collapsed into one "N more agents (see the `list` command)" line.
 - **Owner only:** If another user opens the Home tab, nothing is published, so they never see agent information.
 
 ## Troubleshooting

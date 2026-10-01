@@ -56,6 +56,7 @@ PREVIEW_HEAD_CUT_MARK = "…(rest omitted)"
 PREVIEW_USER_CHARS = 1500  # a prompt keeps its start, an answer its end (PREVIEW_CHARS)
 PREVIEW_MAX_BLOCKS = 40  # conversation blocks in the send modal (Slack: <= 100 per view)
 PREVIEW_MAX_TOTAL_CHARS = 12000
+EVENT_LINE_MAX = 300
 BLOCK_PREVIEW_PREFIX = "preview_"  # conversation blocks: preview_0, preview_1, ...
 BLOCK_WS = "ws"
 BLOCK_KIND = "kind"
@@ -500,19 +501,27 @@ def conversation_blocks(turns: Sequence, agent_label: str, now: float, *, omitte
                         note: str | None = None) -> list:
     """The conversation for the send modal, oldest first (newest right above the Prompt input).
     Filled newest-first within PREVIEW_MAX_BLOCKS / PREVIEW_MAX_TOTAL_CHARS; older messages that
-    do not fit become one line at the top. `turns` have `.role`, `.text`, `.at`; `omitted` = the
+    do not fit become one line at the top. `turns` have `.role` (user / assistant / event: one
+    ⚙️ line), `.text`, `.at`; `omitted` = the
     source itself lacks older messages; `note` (working/blocked) goes below the newest message."""
     room = PREVIEW_MAX_BLOCKS - 1 - (1 if note else 0)  # one line kept for "earlier messages"
-    chars = 0
+    chars = used = 0
     shown: list[list] = []
     for turn in reversed(turns):
-        user = turn.role == "user"
-        body = _message_body(turn.text, keep_tail=not user,
-                             limit=PREVIEW_USER_CHARS if user else PREVIEW_CHARS)
-        if shown and (2 * (len(shown) + 1) > room or chars + len(body) > PREVIEW_MAX_TOTAL_CHARS):
+        when = relative_time(turn.at, now)
+        if turn.role == "event":  # not written by the owner (background task finished, compaction): one line
+            body = escape(truncate(" ".join(turn.text.split()), EVENT_LINE_MAX))
+            message = [context(" · ".join(p for p in (f"⚙️ _{body}_", when) if p))]
+        else:
+            user = turn.role == "user"
+            body = _message_body(turn.text, keep_tail=not user,
+                                 limit=PREVIEW_USER_CHARS if user else PREVIEW_CHARS)
+            who = "👤 You" if user else f"🤖 {escape(agent_label)}"
+            message = [context(" · ".join(p for p in (who, when) if p)), section(body)]
+        if shown and (used + len(message) > room or chars + len(body) > PREVIEW_MAX_TOTAL_CHARS):
             break
-        who = "👤 You" if user else f"🤖 {escape(agent_label)}"
-        shown.append([context(" · ".join(p for p in (who, relative_time(turn.at, now)) if p)), section(body)])
+        shown.append(message)
+        used += len(message)
         chars += len(body)
     hidden = len(turns) - len(shown)
     blocks: list = []
