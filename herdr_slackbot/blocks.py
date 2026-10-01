@@ -57,6 +57,7 @@ PREVIEW_USER_CHARS = 1500  # a prompt keeps its start, an answer its end (PREVIE
 PREVIEW_MAX_BLOCKS = 40  # conversation blocks in the send modal (Slack: <= 100 per view)
 PREVIEW_MAX_TOTAL_CHARS = 12000
 EVENT_LINE_MAX = 300
+RESULT_HISTORY_MAX_CHARS = 12000  # result message text incl. history (the final answer has priority)
 BLOCK_PREVIEW_PREFIX = "preview_"  # conversation blocks: preview_0, preview_1, ...
 BLOCK_WS = "ws"
 BLOCK_KIND = "kind"
@@ -483,8 +484,16 @@ def relative_time(at: float | None, now: float) -> str:
     return time.strftime("%m-%d %H:%M", time.localtime(at))
 
 
-def _message_body(text: str, keep_tail: bool, limit: int) -> str:
-    """mrkdwn of one conversation message within SECTION_MAX: answers keep their end (the
+def clock_time(at: float | None, now: float) -> str:
+    """Absolute local time for messages that stay in Slack: `HH:MM`, with the date on another day."""
+    if not at:
+        return ""
+    fmt = "%H:%M" if time.localtime(at)[:3] == time.localtime(now)[:3] else "%m-%d %H:%M"
+    return time.strftime(fmt, time.localtime(at))
+
+
+def _message_body(text: str, keep_tail: bool, limit: int) -> tuple[str, bool]:
+    """(mrkdwn, cut) of one conversation message within SECTION_MAX: answers keep their end (the
     conclusion), prompts their start; a cut is marked."""
     text = text.strip("\n")
     while True:
@@ -493,8 +502,37 @@ def _message_body(text: str, keep_tail: bool, limit: int) -> str:
         if cut:
             body = PREVIEW_CUT_MARK + "\n" + body if keep_tail else body + "\n" + PREVIEW_HEAD_CUT_MARK
         if len(body) <= SECTION_MAX or limit < 200:
-            return body[-SECTION_MAX:] if keep_tail else body[:SECTION_MAX]
+            return (body[-SECTION_MAX:] if keep_tail else body[:SECTION_MAX]), cut or len(body) > SECTION_MAX
         limit = int(limit * 0.8)  # escaping made it longer: take less
+
+
+def _history_messages(turns: Sequence, agent_label: str, now: float, room: int, max_chars: int,
+                      keep_newest: bool, when_of=relative_time) -> tuple[list[list], bool]:
+    """Conversation messages filled newest-first within `room` blocks / `max_chars` body chars.
+    Returns (messages oldest first, each a list of blocks; whether a shown message was cut).
+    `keep_newest`: the newest message is shown even if it alone exceeds the budget."""
+    chars = used = 0
+    shown: list[list] = []
+    cut_any = False
+    for turn in reversed(turns):
+        when = when_of(turn.at, now)
+        if turn.role == "event":  # not written by the owner (background task finished, compaction): one line
+            line = " ".join(turn.text.split())
+            body, cut = escape(truncate(line, EVENT_LINE_MAX)), len(line) > EVENT_LINE_MAX
+            message = [context(" · ".join(p for p in (f"⚙️ _{body}_", when) if p))]
+        else:
+            user = turn.role == "user"
+            body, cut = _message_body(turn.text, keep_tail=not user,
+                                      limit=PREVIEW_USER_CHARS if user else PREVIEW_CHARS)
+            who = "👤 You" if user else f"🤖 {escape(agent_label)}"
+            message = [context(" · ".join(p for p in (who, when) if p)), section(body)]
+        if (shown or not keep_newest) and (used + len(message) > room or chars + len(body) > max_chars):
+            break
+        shown.append(message)
+        cut_any = cut_any or cut
+        used += len(message)
+        chars += len(body)
+    return shown[::-1], cut_any
 
 
 def conversation_blocks(turns: Sequence, agent_label: str, now: float, *, omitted: bool = False,
@@ -505,24 +543,7 @@ def conversation_blocks(turns: Sequence, agent_label: str, now: float, *, omitte
     ⚙️ line), `.text`, `.at`; `omitted` = the
     source itself lacks older messages; `note` (working/blocked) goes below the newest message."""
     room = PREVIEW_MAX_BLOCKS - 1 - (1 if note else 0)  # one line kept for "earlier messages"
-    chars = used = 0
-    shown: list[list] = []
-    for turn in reversed(turns):
-        when = relative_time(turn.at, now)
-        if turn.role == "event":  # not written by the owner (background task finished, compaction): one line
-            body = escape(truncate(" ".join(turn.text.split()), EVENT_LINE_MAX))
-            message = [context(" · ".join(p for p in (f"⚙️ _{body}_", when) if p))]
-        else:
-            user = turn.role == "user"
-            body = _message_body(turn.text, keep_tail=not user,
-                                 limit=PREVIEW_USER_CHARS if user else PREVIEW_CHARS)
-            who = "👤 You" if user else f"🤖 {escape(agent_label)}"
-            message = [context(" · ".join(p for p in (who, when) if p)), section(body)]
-        if shown and (used + len(message) > room or chars + len(body) > PREVIEW_MAX_TOTAL_CHARS):
-            break
-        shown.append(message)
-        used += len(message)
-        chars += len(body)
+    shown, _ = _history_messages(turns, agent_label, now, room, PREVIEW_MAX_TOTAL_CHARS, keep_newest=True)
     hidden = len(turns) - len(shown)
     blocks: list = []
     if hidden:
@@ -530,8 +551,8 @@ def conversation_blocks(turns: Sequence, agent_label: str, now: float, *, omitte
                               f"message{'s' if hidden != 1 or omitted else ''} not shown_"))
     elif omitted:
         blocks.append(context(f"_{PREVIEW_OMITTED}_"))
-    for pair in reversed(shown):
-        blocks.extend(pair)
+    for message in shown:
+        blocks.extend(message)
     if note:
         blocks.append(context(f"_{escape(note)}_"))
     if not blocks:
@@ -819,10 +840,46 @@ def result_blocks(header: str, context_parts: Sequence[str], body: str, result_i
         blocks.append(context("※ " + escape(truncate(recap, 500))))
     blocks.append(section(text or "_(empty response)_"))
     if truncated and result_id:
-        blocks.append({
-            "type": "actions",
-            "block_id": "result_ctl",
-            "elements": [{"type": "button", "action_id": ACTION_SHOW_FULL, "text": plain("View full"),
-                          "value": result_id}],
-        })
+        blocks.append(_full_button(result_id))
     return blocks, truncated
+
+
+def _full_button(result_id: str) -> dict:
+    return {
+        "type": "actions",
+        "block_id": "result_ctl",
+        "elements": [{"type": "button", "action_id": ACTION_SHOW_FULL, "text": plain("View full"),
+                      "value": result_id}],
+    }
+
+
+def result_history_blocks(header: str, context_parts: Sequence[str], history: Sequence, body: str,
+                          result_id: str | None, recap: str | None = None, limit: int = SECTION_MAX,
+                          markdown: bool = True, *, agent_label: str = "", answered_at: float | None = None,
+                          now: float = 0.0) -> tuple[list, bool]:
+    """Result message with the conversation since the previous notification above the final answer.
+    Header, context, recap and the final answer are built by `result_blocks` and always present;
+    `history` (Turns, oldest first, without the final answer) fills the remaining room newest
+    first. Returns (blocks, needs_full): the final answer was truncated, or a history message was
+    cut or dropped. With `result_id` the message then gets a [View full] button."""
+    base, truncated = result_blocks(header, context_parts, body, None, recap, limit, markdown)
+    split = 2 if any(context_parts) else 1  # header (+ context) above the history
+    head, rest = base[:split], base[split:]
+    label = context(" · ".join(p for p in (f"🤖 {escape(agent_label)}", clock_time(answered_at, now)) if p))
+    room = MAX_BLOCKS - len(base) - 3  # the answer label, the "earlier" line, the button
+    budget = RESULT_HISTORY_MAX_CHARS - sum(len((b.get("text") or {}).get("text") or "") for b in base)
+    shown, cut_any = _history_messages(history, agent_label, now, room, budget, keep_newest=False,
+                                       when_of=clock_time)
+    hidden = len(history) - len(shown)
+    needs_full = truncated or cut_any or hidden > 0
+    blocks = list(head)
+    if hidden:
+        more = " — View full" if result_id else ""
+        blocks.append(context(f"_… {hidden} earlier message{'s' if hidden != 1 else ''} not shown{more}_"))
+    for message in shown:
+        blocks.extend(message)
+    blocks.append(label)
+    blocks.extend(rest)
+    if needs_full and result_id:
+        blocks.append(_full_button(result_id))
+    return blocks, needs_full

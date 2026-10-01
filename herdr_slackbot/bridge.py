@@ -45,6 +45,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -72,6 +73,7 @@ from .dialog import (KIND_PLAN, KIND_TRUST, Dialog, keys_for, parse_dialog, scre
                      tail_lines, text_keys, typed_text)
 from .events import AgentTransition, SubscriptionManager, session_of
 from .herdr_client import HerdrError, HerdrOutcomeUnknown
+from .history import HistoryRange, newer_cursor, range_markdown, select_range, skip_slack_prompt
 from .naming import (
     agent_display_name,
     auto_agent_name,
@@ -1484,8 +1486,8 @@ class Bridge:
                 if _seq(info) > int(entry.get("last_result_seq") or 0):
                     ws_label = self._ws_labels().get(info.get("workspace_id"), info.get("workspace_id") or "")
                     op = _result_op(key, current, info)
-                    self._retrying(lambda: self.post_result(key, entry, info, ws_label, current, op=op))
-                    self._commit(key, op, last_result_seq=_seq(info), pending_task=None)
+                    cursor = self._retrying(lambda: self.post_result(key, entry, info, ws_label, current, op=op))
+                    self._commit(key, op, last_result_seq=_seq(info), pending_task=None, **cursor)
                 else:
                     self.state.set_pending_task(key, None)
             return True
@@ -2259,8 +2261,9 @@ class Bridge:
                     self._open_dialog(key, entry, info, ws_label, op, **fields)
             elif decision.action is Action.COMPLETED:
                 op = _result_op(key, pending, info, t.at)
-                self.post_result(key, entry, info, ws_label, pending, op=op)
-                fields = {"last_result_seq": seq} if seq else {}
+                fields = self.post_result(key, entry, info, ws_label, pending, op=op)
+                if seq:
+                    fields["last_result_seq"] = seq
                 if decision.clear_pending and pending:
                     fields.update(self._task_cleared(key, pending.get("task_id")))
                 self._commit(key, op, **fields)
@@ -2272,7 +2275,11 @@ class Bridge:
         return {"pending_task": None} if task_id and current == task_id else {}
 
     def post_result(self, key: str, entry: Mapping, info: Mapping, ws_label: str,
-                    pending: Mapping | None, op: str | None = None) -> None:
+                    pending: Mapping | None, op: str | None = None) -> dict:
+        """Post the ✅ result message. For a Claude agent whose answer came from the session JSONL,
+        the message also shows the conversation since the previous notification in this thread
+        (prompts typed or queued on the PC, intermediate answers, ⚙️ events). Returns the thread
+        fields the caller commits together with `op` (the advanced `history_cursor`, if any)."""
         kind = info.get("agent") or entry.get("kind")
         cwd = info.get("cwd") or entry.get("cwd")
         pane = info.get("pane_id") or entry.get("pane_id")
@@ -2287,13 +2294,44 @@ class Bridge:
         ctx = [f"📁 `{B.escape(cwd)}`" if cwd else "", B.escape(truncate(title, 80)) if title else "",
                "_raw output_" if not res.parsed else ""]
         markdown = res.source != "tail"
-        blocks, truncated = B.result_blocks(header, ctx, res.text, None, res.recap,
-                                            self.cfg.result_max_chars, markdown)
-        if truncated:
-            rid = self.results.save(res.text, {"name": name, "session": session, "at": self.clock()})
-            blocks, _ = B.result_blocks(header, ctx, res.text, rid, res.recap, self.cfg.result_max_chars, markdown)
+        span = self._history_range(kind, session, cwd, entry, res) if res.source == "jsonl" else None
+        shown = skip_slack_prompt(span.turns[:-1], (pending or {}).get("prompt"), PROMPT_EXCERPT) if span else []
+        meta = {"name": name, "session": session, "at": self.clock()}
+        if shown:
+            final = span.turns[-1]
+            build = partial(B.result_history_blocks, header, ctx, shown, res.text, recap=res.recap,
+                            limit=self.cfg.result_max_chars, markdown=markdown, agent_label=name,
+                            answered_at=final.at, now=self.clock())
+            blocks, needs_full = build(None)
+            if needs_full:
+                blocks, _ = build(self.results.save(range_markdown(span.turns, name), meta))
+        else:
+            blocks, truncated = B.result_blocks(header, ctx, res.text, None, res.recap,
+                                                self.cfg.result_max_chars, markdown)
+            if truncated:
+                rid = self.results.save(res.text, meta)
+                blocks, _ = B.result_blocks(header, ctx, res.text, rid, res.recap, self.cfg.result_max_chars,
+                                            markdown)
         fallback = f"✅ {name} finished" + (f" · {duration}" if duration else "")
         self._post(fallback, blocks, entry.get("thread_ts"), op=op, key=key if op else None)
+        if span is None or not newer_cursor(entry.get("history_cursor"), span.cursor):
+            return {}
+        return {"history_cursor": span.cursor}
+
+    def _history_range(self, kind: str | None, session: str, cwd: str | None, entry: Mapping,
+                       res) -> HistoryRange | None:
+        """The conversation range the result covers, or None (codex, no transcript, read error,
+        answer not found): the plain result is posted and the cursor stays."""
+        if kind != KIND_CLAUDE or not session:
+            return None
+        try:
+            conv = claude_conversation(session, cwd, base=self.claude_projects)
+            if conv is None or not conv.turns:
+                return None
+            return select_range(conv.turns, res.text, entry.get("history_cursor"))
+        except Exception:  # never let the history keep the result from being posted
+            log.exception("reading the conversation for the result failed")
+            return None
 
     # --- restart ------------------------------------------------------------------------
     def handle_resume(self, key: str, task_id: str | None = None) -> None:
@@ -2355,8 +2393,8 @@ class Bridge:
             if not seq or seq > int(entry.get("last_result_seq") or 0):
                 ws_label = self._ws_labels().get(info.get("workspace_id"), info.get("workspace_id") or "")
                 op = _result_op(key, pending, info)
-                self.post_result(key, entry, info, ws_label, pending, op=op)
-                self._commit(key, op, **({"last_result_seq": seq} if seq else {}), **cleared)
+                cursor = self.post_result(key, entry, info, ws_label, pending, op=op)
+                self._commit(key, op, **({"last_result_seq": seq} if seq else {}), **cleared, **cursor)
                 return
         elif decision.action is Action.BLOCKED:
             if not seq or seq > int(entry.get("last_blocked_seq") or 0):

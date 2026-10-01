@@ -258,6 +258,8 @@ Below, `/herdr` stands for your own `SLASH_COMMAND` (e.g. `/herdr-kim`). Use it 
   - The 🔕 button in a thread mutes that agent. Results of work sent from Slack arrive regardless of mute.
 - **Result text:**
   - For claude, the last answer is read from the session JSONL, falling back to parsing the screen. For codex, the end of the screen is sent.
+  - For claude (answer read from the JSONL), the message also shows the **conversation since the previous notification in that thread**, above the final answer: prompts typed on the PC or queued while the agent worked, the intermediate answers and `⚙️` lines (background task finished, conversation compacted). So the thread reads as the whole conversation without repeats. A prompt you sent from Slack is not repeated (it is already in the thread). The first message in a thread shows only the latest turn. Blocked-dialog messages carry no history; the next result covers what happened meanwhile, and so does a result after a muted stretch. Codex, or no transcript: only the result, as before.
+  - The final answer always stays; if the message runs out of room, older items collapse into "… N earlier messages not shown — View full", and **[View full]** then uploads the whole range untruncated.
   - Over 3000 characters, the text is truncated and a **[View full]** button uploads the full content as a `.md` file.
 
 ### Answering dialogs

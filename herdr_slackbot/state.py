@@ -16,6 +16,8 @@ state.json layout (version 1):
                                      # the open blocked-dialog message (answered from Slack)
       "deferred_prompt": {"text": ...} | null  # a new agent's first prompt, sent once its
                                      # startup dialog (folder trust) is answered
+      "history_cursor": {"id": <record uuid>, "at": <epoch>}  # last conversation item a posted
+                                     # result covered (Claude JSONL; see history.py)
     }
   }
 }

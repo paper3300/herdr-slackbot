@@ -311,6 +311,7 @@ class Turn:
     role: str  # "user" | "assistant" | "event" (a turn not started by the owner: task notification ...)
     text: str
     at: float | None
+    id: str | None = None  # uuid of the record: the prompt / event record, or the answer's last record
 
 
 @dataclass(frozen=True)
@@ -326,6 +327,11 @@ class _Start:
     text: str
     show_head: bool = True
     show_answer: bool = True
+
+
+def _uuid(entry: dict) -> str | None:
+    value = entry.get("uuid")
+    return value if isinstance(value, str) and value else None
 
 
 def _texts(entry: dict) -> list[str]:
@@ -412,8 +418,8 @@ def _turn_start(index: int, entry: dict) -> _Start | None:
     return _Start(index, "user", _prompt_text(_blocks(entry)))
 
 
-def _final_text(turn: list[dict], last: bool) -> tuple[str, float | None] | None:
-    """(text, at) of a turn's answer, by the `evaluate_lines` rule: the text blocks of the turn's
+def _final_text(turn: list[dict], last: bool) -> tuple[str, float | None, str | None] | None:
+    """(text, at, uuid) of a turn's answer, by the `evaluate_lines` rule: the text blocks of the turn's
     last assistant message. None when the turn was interrupted, stopped at a tool call, or (for the
     latest turn) the message is not finished yet."""
     if any(_is_interrupt(e) for e in turn):
@@ -433,7 +439,7 @@ def _final_text(turn: list[dict], last: bool) -> tuple[str, float | None] | None
         for e in final for b in _blocks(e)
         if b.get("type") == "text" and str(b.get("text", "")).strip()
     )
-    return (text, _ts(final[-1])) if text else None
+    return (text, _ts(final[-1]), _uuid(final[-1])) if text else None
 
 
 def _parent_of(entry: dict):
@@ -548,13 +554,13 @@ def conversation_from_lines(lines: Iterable[str], tail_cut: bool = False) -> lis
     turns: list[Turn] = []
     for n, start in enumerate(starts):
         if start.show_head:
-            turns.append(Turn(start.role, start.text, _ts(entries[start.index])))
+            turns.append(Turn(start.role, start.text, _ts(entries[start.index]), _uuid(entries[start.index])))
         if not start.show_answer:
             continue
         end = starts[n + 1].index if n + 1 < len(starts) else len(entries)
         answer = _final_text(entries[start.index + 1:end], last=n + 1 == len(starts))
         if answer is not None:
-            turns.append(Turn("assistant", answer[0], answer[1]))
+            turns.append(Turn("assistant", *answer))
     return turns
 
 
