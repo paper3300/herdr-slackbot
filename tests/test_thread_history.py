@@ -98,7 +98,9 @@ def test_select_range_from_cursor_latest_turn_and_fallbacks():
     assert [t.text for t in by_time.turns][0] == "B"
     for cursor in ({"id": "gone"}, {"id": "gone", "at": 0.5}, {"at": "x"}, "junk"):  # no anchor -> latest turn
         assert [t.text for t in select_range(turns, "Answer CD", cursor).turns] == ["C", "D", "Answer CD"]
-    assert [t.text for t in select_range(turns, "Answer CD", {"id": "a3", "at": 7.0}).turns] == ["C", "D", "Answer CD"]
+    for cursor in ({"id": "a3", "at": 7.0}, {"id": "gone", "at": 7.0}, {"at": 9.0}):  # N1: nothing new
+        same = select_range(turns, "Answer CD", cursor)
+        assert [t.text for t in same.turns] == ["Answer CD"] and not same.advance
     assert select_range(turns, "not in the transcript", None) is None
 
 
@@ -306,3 +308,123 @@ def test_range_markdown_contains_everything():
     md = range_markdown([Turn("user", "q", None), Turn("event", "Background task finished", None),
                          Turn("assistant", "a\n", None)], "coder")
     assert md == "**👤 You**\n\nq\n\n---\n\n⚙️ _Background task finished_\n\n---\n\n**🤖 coder**\n\na\n"
+
+
+# --- review fixes (docs/review/thread-history.md) ---------------------------------------------
+
+def _slack_task(env, tr, task_id="T1", prompt="slack prompt"):
+    env.state.set_pending_task(SID, {"task_id": task_id, "started_at": tr.last + 0.5, "seq0": 0,
+                                     "working_announced": True, "prompt": prompt})
+    tr.prompt(f"u-{task_id}", prompt)
+    tr.answer(f"a-{task_id}", f"{task_id} done")
+
+
+def _thread(env, tr):
+    tr.prompt("u0", "start")
+    tr.answer("a0", "started")
+    env.state.upsert_thread(SID, channel="D-OWNER", thread_ts="1.0", pane_id="w1:p1",
+                            history_cursor={"id": "a0", "at": 0})
+
+
+def test_t1_uncertain_post_then_pc_turn_then_transition_keeps_the_posted_cursor(env, agent):
+    from fakes import Accepted
+    tr = Transcript(env)
+    _thread(env, tr)
+    _slack_task(env, tr)
+    env.herdr.set_status("w1:p1", "working")
+    env.herdr.set_status("w1:p1", "done")
+    env.transport.fail_posts = [Accepted()]  # posted, response lost: the intent (and its cursor) stays
+    with pytest.raises(Exception):
+        env.bridge._notify_transition(SID, transition(env, "w1:p1", "working", "done"))
+    intent = env.state.get_thread(SID)["post_intents"]["result:T1"]
+    assert intent["payload"] == {"history_cursor": {"id": "a-T1", "at": intent["payload"]["history_cursor"]["at"]}}
+    tr.prompt("u-pc", "PC follow-up")
+    tr.answer("a-pc", "PC follow-up answer")
+    env.herdr.set_status("w1:p1", "working")
+    finish(env)  # still the Slack task: the same op reuses the first post
+    assert len(results_posted(env)) == 1
+    entry = env.state.get_thread(SID)
+    assert entry["pending_task"] is None and entry["history_cursor"]["id"] == "a-T1"  # what was posted
+    tr.prompt("u-next", "later PC prompt")
+    tr.answer("a-next", "later answer")
+    env.herdr.set_status("w1:p1", "working")
+    joined = "\n".join(texts(finish(env)["blocks"]))
+    assert "PC follow-up" in joined and "PC follow-up answer" in joined and "later answer" in joined
+
+
+def test_t1_reused_op_returns_the_stored_cursor_not_a_fresh_one(env, agent):
+    tr = Transcript(env)
+    _thread(env, tr)
+    tr.prompt("u1", "two")
+    tr.answer("a1", "second")
+    entry, info = env.state.get_thread(SID), env.herdr.find_agent("w1:p1")
+    first = env.bridge.post_result(SID, entry, info, "Main", None, op="result:X")  # commit "lost"
+    tr.prompt("u2", "three")
+    tr.answer("a2", "third")
+    again = env.bridge.post_result(SID, env.state.get_thread(SID), info, "Main", None, op="result:X")
+    assert first == again and again["history_cursor"]["id"] == "a1"
+    assert len(results_posted(env)) == 1
+    env.state.upsert_thread(SID, post_intents={"result:Y": {"since": env.clock(), "ts": "1000.0001"}})
+    assert env.bridge.post_result(SID, env.state.get_thread(SID), info, "Main", None, op="result:Y") == {}
+
+
+def test_t1_resume_after_a_crash_between_post_and_commit(env, agent):
+    tr = Transcript(env)
+    _thread(env, tr)
+    _slack_task(env, tr, "T9")
+    entry, info = env.state.get_thread(SID), env.herdr.find_agent("w1:p1")
+    env.herdr.set_status("w1:p1", "done")
+    env.bridge.post_result(SID, entry, info, "Main", entry["pending_task"], op="result:T9")  # then the crash
+    tr.prompt("u-pc", "typed before the restart")
+    tr.answer("a-pc", "answered before the restart")
+    env.bridge._intents.clear()  # a new process: only the persisted intent is left
+    env.bridge.handle_resume(SID, "T9")
+    assert len(results_posted(env)) == 1
+    entry = env.state.get_thread(SID)
+    assert entry["pending_task"] is None and entry["history_cursor"]["id"] == "a-T9"
+    tr.prompt("u-n", "next")
+    tr.answer("a-n", "next answer")
+    env.herdr.set_status("w1:p1", "working")
+    joined = "\n".join(texts(finish(env)["blocks"]))
+    assert "typed before the restart" in joined and "answered before the restart" in joined
+
+
+def test_n1_status_flap_without_a_new_turn_posts_the_plain_result(env, agent):
+    tr = Transcript(env)
+    tr.prompt("u1", "PC prompt one")
+    tr.answer("a1", "answer one")
+    finish(env)
+    cursor = env.state.get_thread(SID)["history_cursor"]
+    env.herdr.set_status("w1:p1", "working")
+    msg = finish(env)  # a new seq, but no model turn
+    assert [b["type"] for b in msg["blocks"]] == ["section", "context", "section"]
+    assert "PC prompt one" not in "\n".join(texts(msg["blocks"]))
+    assert env.state.get_thread(SID)["history_cursor"] == cursor
+
+
+def test_n2_a_cursor_without_timestamp_never_replaces_a_timestamped_one():
+    assert not newer_cursor({"id": "a", "at": 5.0}, {"id": "b", "at": None})
+    assert newer_cursor({"id": "a", "at": None}, {"id": "b", "at": None})
+    turns = [Turn("user", "q", 1.0, "u1"), Turn("assistant", "A", 2.0, "a1"),
+             Turn("user", "q2", None, "u2"), Turn("assistant", "B", None, "a2")]
+    rng = select_range(turns, "B", {"id": "a1", "at": 2.0})  # ids show it is newer
+    assert rng.advance and rng.cursor == {"id": "a2", "at": None}
+    unplaced = select_range(turns, "B", {"id": "gone", "at": 9.0})  # unknown order: keep the cursor
+    assert not unplaced.advance
+
+
+def test_conversation_is_read_with_the_result_tail(env, agent, monkeypatch):
+    import herdr_slackbot.bridge as bridge_mod
+    from herdr_slackbot.claude_session import TAIL_BYTES
+    tr = Transcript(env)
+    tr.prompt("u1", "q")
+    tr.answer("a1", "a")
+    seen = []
+    orig = bridge_mod.claude_conversation
+
+    def spy(*a, **k):
+        seen.append(k.get("max_bytes"))
+        return orig(*a, **k)
+    monkeypatch.setattr(bridge_mod, "claude_conversation", spy)
+    finish(env)
+    assert seen == [TAIL_BYTES]

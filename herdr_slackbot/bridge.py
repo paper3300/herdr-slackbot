@@ -59,7 +59,7 @@ from .agents import (
     codex_home,
     codex_model_options,
 )
-from .claude_session import agent_result, conversation as claude_conversation
+from .claude_session import TAIL_BYTES as CLAUDE_TAIL_BYTES, agent_result, conversation as claude_conversation
 from .commands import (
     parse_command,
     parse_new_args,
@@ -481,22 +481,34 @@ class Bridge:
         """Post to the DM. With `op`, the post is idempotent across attempts (see module doc).
         With `key`, the intent lives in that thread entry (survives restarts) and the caller
         must finish with `_commit(key, op, ...)`; without a key it is in-process only."""
+        return self._post_tracked(text, blocks, thread_ts, op, key)[0]
+
+    def _post_tracked(self, text: str, blocks: list | None, thread_ts: str | None, op: str | None,
+                      key: str | None, payload: dict | None = None) -> tuple[str, dict, bool]:
+        """`_post` that also returns (ts, payload of the message actually in Slack, reused).
+        `payload` (state the caller commits with `op`, e.g. a history cursor) is stored in the intent
+        before posting; when an earlier accepted or found post is reused, that post's stored payload
+        is returned instead ({} for an intent without one), never this attempt's."""
+        payload = dict(payload or {})
         if op is None:
-            return self.transport.post_message(self.dm_channel, text, blocks, thread_ts)
+            return self.transport.post_message(self.dm_channel, text, blocks, thread_ts), payload, False
         intent = self._intent(op, key)
         if intent is not None and intent.get("ts"):
-            return intent["ts"]  # accepted earlier; only the caller's commit is missing
+            return intent["ts"], dict(intent.get("payload") or {}), True  # accepted earlier; only the commit is missing
         if intent is not None:
             # May raise SlackLookupIncomplete / transient errors: the outcome stays unknown.
             found = self.transport.find_message(self.dm_channel, op, thread_ts,
                                                 float(intent["since"]) - INTENT_LOOKBACK)
             if found:
                 log.info("Slack post %s was accepted before; reusing %s", op, found)
-                return self._accepted(op, key, intent, found)
+                return self._accepted(op, key, intent, found), dict(intent.get("payload") or {}), True
             if self.clock() - float(intent["since"]) < MIN_ABSENT_AGE:
                 raise SlackTransientError("lookup_too_early")
+            if intent.get("payload") != (payload or None):  # this attempt posts other content
+                intent = dict(intent, payload=payload or None)
+                self._store_intent(op, key, intent)
         else:
-            intent = self._add_intent(op, key)
+            intent = self._add_intent(op, key, payload)
         try:
             ts = self.transport.post_message(self.dm_channel, text, blocks, thread_ts, op=op)
         except SlackUncertainError:
@@ -504,7 +516,7 @@ class Bridge:
         except Exception:
             self._drop_intent(op, key)  # Slack answered: definitely not posted
             raise
-        return self._accepted(op, key, intent, ts)
+        return self._accepted(op, key, intent, ts), payload, False
 
     def _intent(self, op: str, key: str | None) -> dict | None:
         if op in self._intents:
@@ -524,8 +536,10 @@ class Bridge:
             intents[op] = intent
             self.state.upsert_thread(key, post_intents=intents)
 
-    def _add_intent(self, op: str, key: str | None) -> dict:
+    def _add_intent(self, op: str, key: str | None, payload: dict | None = None) -> dict:
         intent = {"since": self.clock(), "ts": None}
+        if payload:
+            intent["payload"] = payload  # durable with the intent, before the post
         self._store_intent(op, key, intent)
         return intent
 
@@ -2313,10 +2327,15 @@ class Bridge:
                 blocks, _ = B.result_blocks(header, ctx, res.text, rid, res.recap, self.cfg.result_max_chars,
                                             markdown)
         fallback = f"✅ {name} finished" + (f" · {duration}" if duration else "")
-        self._post(fallback, blocks, entry.get("thread_ts"), op=op, key=key if op else None)
-        if span is None or not newer_cursor(entry.get("history_cursor"), span.cursor):
-            return {}
-        return {"history_cursor": span.cursor}
+        payload = {"history_cursor": span.cursor} if span is not None and span.advance else {}
+        _, posted, reused = self._post_tracked(fallback, blocks, entry.get("thread_ts"), op, key if op else None,
+                                               payload)
+        cursor = posted.get("history_cursor")
+        if not isinstance(cursor, dict):
+            return {}  # nothing to advance, or an older intent without a cursor: the cursor stays
+        if reused and not newer_cursor((self.state.get_thread(key) or {}).get("history_cursor"), cursor):
+            return {}  # the reused post's cursor is not ahead of the stored one
+        return {"history_cursor": cursor}
 
     def _history_range(self, kind: str | None, session: str, cwd: str | None, entry: Mapping,
                        res) -> HistoryRange | None:
@@ -2325,7 +2344,8 @@ class Bridge:
         if kind != KIND_CLAUDE or not session:
             return None
         try:
-            conv = claude_conversation(session, cwd, base=self.claude_projects)
+            # the same tail as the result read, so the answer's prompt is in it whenever the answer is
+            conv = claude_conversation(session, cwd, base=self.claude_projects, max_bytes=CLAUDE_TAIL_BYTES)
             if conv is None or not conv.turns:
                 return None
             return select_range(conv.turns, res.text, entry.get("history_cursor"))
