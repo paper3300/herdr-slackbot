@@ -179,8 +179,8 @@ def test_result_blocks_escape():
 
 def test_misc_blocks():
     assert "started" in B.started_blocks()[0]["elements"][0]["text"]
-    assert "needs confirmation on PC" in B.blocked_blocks("a<b", "ws")[0]["text"]["text"]
-    assert "a&lt;b" in B.blocked_blocks("a<b", "ws")[0]["text"]["text"]
+    assert "is waiting for your answer" in B.dialog_header("a<b", "ws")
+    assert "a&lt;b" in B.dialog_header("a<b", "ws")
     assert B.sent_blocks("  hi\n there ")[0]["text"]["text"] == "📨 hi there"
 
 
@@ -189,3 +189,129 @@ def test_chunk_lines(n):
     chunks = B.chunk_lines(["z" * 100] * n, 3000)
     assert all(len(c) <= 3000 for c in chunks)
     assert sum(c.count("z" * 100) for c in chunks) == n
+
+
+# --- blocked dialogs ---------------------------------------------------------------------------
+
+def _dialog(transcript, name, kind="claude"):
+    from herdr_slackbot.dialog import parse_dialog
+    return parse_dialog(transcript(name), kind)
+
+
+def _buttons(blocks):
+    return [e for b in blocks if b["type"] == "actions" for e in b["elements"]]
+
+
+def _mrkdwn(blocks):
+    """All mrkdwn text of sections and contexts."""
+    out = [b["text"]["text"] for b in blocks if b["type"] == "section"]
+    out += [e["text"] for b in blocks if b["type"] == "context" for e in b["elements"]]
+    return "\n".join(out)
+
+
+def test_dialog_blocks_permission(transcript):
+    d = _dialog(transcript, "dialog_claude_permission.txt")
+    blocks = B.dialog_blocks("coder", "Main", d, "tok")
+    text = _mrkdwn(blocks)
+    assert blocks[0]["text"]["text"] == "⚠️ *coder* · Main is waiting for your answer"
+    assert "```\necho spike &gt; a.txt" in text  # the command in a code block
+    assert "*Do you want to proceed?*" in text
+    assert "from this project" in text  # the full label stays in the section text
+    buttons = _buttons(blocks)
+    assert [b["action_id"] for b in buttons] == ["dlg:opt:0", "dlg:opt:1", "dlg:opt:2", "dlg:key:esc", "dlg:screen"]
+    assert buttons[0]["text"]["text"] == "1. Yes"
+    assert len(buttons[1]["text"]["text"]) <= B.OPTION_TEXT_MAX and buttons[1]["text"]["text"].endswith("…")
+    assert json.loads(buttons[1]["value"]) == {"t": "tok", "o": 1}
+    assert json.loads(buttons[3]["value"]) == {"t": "tok", "o": "esc"}
+    assert all(len(b["value"]) < 100 for b in buttons)  # no screen text in values
+
+
+def test_dialog_blocks_question_free_text_and_chat(transcript):
+    d = _dialog(transcript, "dialog_ask_single.txt")
+    blocks = B.dialog_blocks("coder", "Main", d, "tok")
+    ids = [b["action_id"] for b in _buttons(blocks)]
+    assert ids == ["dlg:opt:0", "dlg:opt:1", "dlg:opt:2", "dlg:text:3", "dlg:opt:4", "dlg:key:esc", "dlg:screen"]
+    text = json.dumps(blocks, ensure_ascii=False)
+    assert "☐ Color · ☐ Fruits" in text and "*Pick a color?*" in text
+    assert "A warm, vibrant color" in text
+
+
+def test_dialog_blocks_multi_select_has_checkboxes_and_next(transcript):
+    d = _dialog(transcript, "dialog_ask_multi.txt")
+    buttons = _buttons(B.dialog_blocks("coder", "Main", d, "tok"))
+    assert buttons[0]["text"]["text"] == "☐ 1. Apple"
+    assert "dlg:key:submit" in [b["action_id"] for b in buttons]  # Next -> = Submit row + Enter
+    assert "dlg:key:right" not in [b["action_id"] for b in buttons]
+    toggled = _dialog(lambda n: transcript(n).replace("1. [ ] Apple", "1. [✔] Apple"), "dialog_ask_multi.txt")
+    assert _buttons(B.dialog_blocks("coder", "Main", toggled, "tok"))[0]["text"]["text"] == "☑ 1. Apple"
+
+
+def test_dialog_blocks_plan_with_full_text_button(transcript):
+    d = _dialog(transcript, "dialog_plan.txt")
+    short = B.dialog_blocks("coder", "Main", d, "tok")
+    assert "Create b.txt" in json.dumps(short) and "show_full" not in json.dumps(short)
+    long_plan = "# Plan\n" + "\n".join(f"- step {i} with some words" for i in range(300))
+    blocks = B.dialog_blocks("coder", "Main", d, "tok", plan_text=long_plan, full_id="rid")
+    full = [b for b in _buttons(blocks) if b["action_id"] == B.ACTION_SHOW_FULL]
+    assert full and full[0]["value"] == "rid" and full[0]["text"]["text"] == "전체 보기"
+    assert all(len(b["text"]["text"]) <= B.SECTION_MAX for b in blocks if b["type"] == "section")
+    assert "*Plan*" in json.dumps(blocks)  # markdown converted
+    assert "dlg:text:2" in [b["action_id"] for b in _buttons(blocks)]
+
+
+def test_dialog_blocks_keypad_when_not_parsed():
+    tail = [f"line {i}" for i in range(30)]
+    blocks = B.dialog_blocks("coder", "Main", None, "tok", screen_tail=tail)
+    text = json.dumps(blocks)
+    assert "line 29" in text and "line 14" not in text  # last 15 lines
+    ids = [b["action_id"] for b in _buttons(blocks)]
+    assert ids == ["dlg:key:1", "dlg:key:2", "dlg:key:3", "dlg:key:4", "dlg:key:up", "dlg:key:down",
+                   "dlg:key:enter", "dlg:key:esc", "dlg:screen"]
+
+
+def test_dialog_blocks_escape_and_limits():
+    from herdr_slackbot.dialog import Dialog, Option
+    options = tuple(Option(i, f"<b>{'x' * 200}", "desc " * 100) for i in range(1, 31))
+    d = Dialog("permission", "T<", ("```evil```", "y" * 5000), "Q?", options)
+    blocks = B.dialog_blocks("n<", "w", d, "tok")
+    assert len(blocks) <= B.MAX_BLOCKS
+    assert all(len(b["text"]["text"]) <= B.SECTION_MAX for b in blocks if b["type"] == "section")
+    assert all(len(b["elements"]) <= 25 for b in blocks if b["type"] == "actions")
+    text = _mrkdwn(blocks)
+    assert "<b>" not in text and "&lt;b&gt;" in text and "n&lt;" in text
+    assert "```evil" not in text  # a fence inside the body is defused
+    block_ids = [b["block_id"] for b in blocks if b.get("block_id")]
+    assert len(block_ids) == len(set(block_ids))
+
+
+def test_dialog_value_and_text_view_round_trip():
+    assert B.parse_dialog_value('{"t": "tok", "o": 2}') == ("tok", 2)
+    assert B.parse_dialog_value("junk") == (None, None)
+    view = B.dialog_text_view("tok", 3, "coder", "Type something.", "Pick a name?",
+                              {"c": "D1", "m": "1.2", "th": "1.0"})
+    assert view["callback_id"] == B.DIALOG_TEXT_CALLBACK
+    view["state"] = {"values": {B.BLOCK_DIALOG_TEXT: {B.ACTION_VALUE: {"value": "베타\n둘째 줄"}}}}
+    assert B.parse_dialog_text_view(view) == ("tok", 3, "베타\n둘째 줄", {"c": "D1", "m": "1.2", "th": "1.0"})
+    bare = B.dialog_text_view("tok", 0, "coder", "Type something.")
+    assert B.parse_dialog_text_view(bare)[3] == {}
+
+
+def test_dialog_closed_and_without_actions():
+    blocks = B.dialog_closed_blocks("coder", "Main", "Bash command — Do you want to proceed?",
+                                    "✅ *1. Yes* — answered from Slack")
+    assert not any(b["type"] == "actions" for b in blocks)
+    assert blocks[-1]["text"]["text"] == "✅ *1. Yes* — answered from Slack"
+    stripped = B.without_actions([{"type": "section", "text": B.mrkdwn("x")}, {"type": "actions", "elements": []}],
+                                 "This question is no longer open.")
+    assert [b["type"] for b in stripped] == ["section", "context"]
+
+
+def test_dialog_blocks_split_many_options_and_clip_huge_labels():
+    from herdr_slackbot.dialog import Dialog, Option
+    options = tuple(Option(i, "L" * 3500 if i == 1 else f"option {i}") for i in range(1, 28))
+    blocks = B.dialog_blocks("coder", "Main", Dialog("unknown", "T", (), "Q?", options), "tok")
+    option_blocks = [b for b in blocks if b["type"] == "actions" and b["block_id"].startswith(B.BLOCK_DIALOG_OPTIONS)]
+    assert [len(b["elements"]) for b in option_blocks] == [25, 2]
+    assert [b["block_id"] for b in option_blocks] == ["dialog_options", "dialog_options1"]
+    assert all(len(b["text"]["text"]) <= B.SECTION_MAX for b in blocks if b["type"] == "section")
+    assert len(_buttons(blocks)[0]["text"]["text"]) <= B.OPTION_TEXT_MAX

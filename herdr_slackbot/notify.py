@@ -36,7 +36,8 @@ def check_send_allowed(status: str | None) -> SendCheck:
 
 
 def check_thread_target(bound_session: str, live_agent: Mapping | None) -> SendCheck:
-    """D11: a thread reply goes only to the agent session the thread is bound to."""
+    """D11: a thread reply goes only to the agent session the thread is bound to. (A reply while
+    the thread's dialog is open is its free-text answer instead: see Bridge.answer_thread_reply.)"""
     if live_agent is None:
         return SendCheck(False, REASON_GONE)
     live_session = (live_agent.get("agent_session") or {}).get("value")
@@ -49,7 +50,7 @@ class Action(str, Enum):
     NONE = "none"
     STARTED = "started"  # "⏳ started (working)" reply for a Slack task
     COMPLETED = "completed"  # result post
-    BLOCKED = "blocked"  # "⚠️ confirm on PC"
+    BLOCKED = "blocked"  # the dialog, with answer buttons
 
 
 @dataclass(frozen=True)

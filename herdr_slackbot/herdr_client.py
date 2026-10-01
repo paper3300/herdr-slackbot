@@ -73,6 +73,11 @@ READ_ONLY_METHODS = frozenset({
 })
 
 
+# Requests whose CLI prints nothing on success (`herdr pane send-text`; verified live on 0.8.2,
+# while `agent send-keys` prints the usual {"result": {"type": "ok"}} envelope).
+SILENT_CLI_METHODS = frozenset({"pane.send_text"})
+
+
 def pipe_path(socket_path: str) -> str:
     if socket_path.startswith(PIPE_PREFIX):
         return socket_path
@@ -290,6 +295,10 @@ def cli_args(method: str, params: dict) -> list[str]:
         return args
     if method == "agent.send_keys":
         return ["agent", "send-keys", p["target"], *p["keys"]]
+    if method == "pane.send_text":
+        # Positional on purpose: the CLI types a `--` separator literally, and text starting with
+        # `-` is typed correctly without one (both verified live on 0.8.2).
+        return ["pane", "send-text", p["pane_id"], p["text"]]
     if method == "tab.list":
         return ["tab", "list"] + (["--workspace", p["workspace_id"]] if p.get("workspace_id") else [])
     if method == "tab.create":
@@ -340,6 +349,8 @@ class CliTransport:
         try:
             result = _unwrap(json.loads(out), method)
         except ValueError as exc:
+            if method in SILENT_CLI_METHODS and not out:
+                return {"type": "ok", "via": "cli"}
             raise HerdrError("bad_response", f"{method}: CLI printed non-JSON output") from exc
         if method == "ping":
             return {"type": "pong", "via": "cli"}
@@ -476,6 +487,14 @@ class HerdrClient:
         if wait:
             params["wait"] = {"timeout_ms": timeout_ms, "until": []}
         return self.request("agent.prompt", params)["agent"]
+
+    def send_keys(self, target: str, keys: Sequence[str]) -> dict:
+        """Press keys in an agent's pane (`1`, `enter`, `esc`, `up`, `down`, `right`, ...)."""
+        return self.request("agent.send_keys", {"target": target, "keys": list(keys)})
+
+    def send_text(self, pane_id: str, text: str) -> dict:
+        """Type literal text into a pane (no Enter)."""
+        return self.request("pane.send_text", {"pane_id": pane_id, "text": text})
 
     # --- events ------------------------------------------------------------
     def subscribe(self, subscriptions: list[dict]) -> EventStream:

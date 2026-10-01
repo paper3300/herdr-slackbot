@@ -4,6 +4,7 @@ translates Slack payloads and enforces the owner guard on every entry point."""
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import Any, Callable, Mapping
 
@@ -189,6 +190,23 @@ def build_app(cfg: Config, bridge: Bridge, *, pairing: Pairing | None = None,
     def on_show_full(ack, body, action):
         ack()
         bridge.show_full(body["channel"]["id"], body["message"], action.get("value") or "")
+
+    @app.action(re.compile("^" + re.escape(B.ACTION_DIALOG_PREFIX)))
+    def on_dialog_action(ack, body, action):
+        ack()  # ack first; the free-text modal then opens with the trigger id before any Herdr I/O
+        try:
+            bridge.dialog_action(action["action_id"], action.get("value") or "", body.get("trigger_id"),
+                                 (body.get("channel") or {}).get("id"), body.get("message") or {})
+        except Exception:
+            log.exception("dialog action failed")
+
+    @app.view(B.DIALOG_TEXT_CALLBACK)
+    def on_dialog_text_submit(ack, body):
+        errors = bridge.submit_dialog_text(body["view"])
+        if errors:
+            ack(response_action="errors", errors=errors)
+        else:
+            ack()
 
     @app.event("app_home_opened")
     def on_home_opened(event):

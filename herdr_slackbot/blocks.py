@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Sequence
 
 from .agents import DEFAULT_PERMISSION_MODE, KIND_CLAUDE, KIND_CODEX, KIND_SPECS, KINDS, PERMISSION_MODES
+from .dialog import KIND_PLAN, KIND_QUESTION_REVIEW, KIND_TRUST, KIND_UNKNOWN, Dialog, Option
 from .naming import agent_display_name, agent_option_label, status_emoji, truncate
 from .parser import truncate_text
 
@@ -57,6 +58,21 @@ BLOCK_THREAD_CTL = "thread_ctl"
 BLOCK_CWD_PREFIX = "cwd:"
 BLOCK_MODEL_PREFIX = "model:"
 BLOCK_EFFORT_PREFIX = "effort:"
+# blocked dialogs: action ids carry the option index / key id after the prefix (unique per block)
+ACTION_DIALOG_PREFIX = "dlg:"
+ACTION_DIALOG_OPTION = "dlg:opt:"
+ACTION_DIALOG_TEXT = "dlg:text:"
+ACTION_DIALOG_KEY = "dlg:key:"
+ACTION_DIALOG_SCREEN = "dlg:screen"
+DIALOG_TEXT_CALLBACK = "herdr_dialog_text"
+BLOCK_DIALOG_OPTIONS = "dialog_options"
+BLOCK_DIALOG_CONTROLS = "dialog_ctl"
+BLOCK_DIALOG_TEXT = "dialog_text"
+DIALOG_BODY_MAX = 1800
+PLAN_MAX_CHARS = 2500
+KEYPAD_TAIL_LINES = 15
+KEYPAD_KEYS = (("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("up", "↑"), ("down", "↓"),
+               ("enter", "Enter"), ("esc", "Esc"))
 
 PERMISSION_LABELS = {
     "manual": "manual (ask for everything)",
@@ -166,6 +182,7 @@ def usage_text(cmd: str) -> str:
         f"• `{cmd} send <agent name|pane id> <prompt>`",
         f"• `{cmd} status`: bridge status",
         "• Reply in an agent's thread to send it a prompt.",
+        "• When an agent is waiting for an answer, use the buttons in its thread (or reply there with text).",
     ])
 
 
@@ -503,8 +520,197 @@ def sent_blocks(prompt: str) -> list:
     return [section("📨 " + escape(truncate(" ".join(prompt.split()), 500)))]
 
 
-def blocked_blocks(name: str, workspace_label: str) -> list:
-    return [section(f"⚠️ *{escape(name)}* · {escape(workspace_label)} needs confirmation on PC")]
+# --- blocked dialogs (answered from Slack) -------------------------------------------------
+
+def dialog_header(name: str, workspace_label: str) -> str:
+    return f"⚠️ *{escape(name)}* · {escape(workspace_label)} is waiting for your answer"
+
+
+def _dialog_value(token: str, choice) -> str:
+    return json.dumps({"t": token, "o": choice})
+
+
+def parse_dialog_value(value: str) -> tuple[str | None, object]:
+    """(token, option index or key id) from a dialog button value."""
+    try:
+        data = json.loads(value or "")
+        return str(data["t"]), data.get("o")
+    except (ValueError, KeyError, TypeError):
+        return None, None
+
+
+def _code(lines: Sequence[str], limit: int) -> str:
+    """Lines as a ``` block, keeping the tail when too long for `limit` characters."""
+    text = defuse_fences(escape("\n".join(lines)))
+    if len(text) > limit - 8:
+        text = "…" + text[-(limit - 9):]
+    return "```\n" + text + "\n```"
+
+
+def _one_line(text: str) -> str:
+    return " ↵ ".join(part.strip() for part in text.split("\n"))
+
+
+def option_button_text(option: Option, multi: bool = False) -> str:
+    box = ("☑ " if option.checked else "☐ ") if multi and option.checked is not None else ""
+    number = f"{option.number}. " if option.number is not None else ""
+    return truncate(f"{box}{number}{_one_line(option.label)}", OPTION_TEXT_MAX)
+
+
+def _option_line(option: Option, multi: bool) -> str:
+    box = ("☑ " if option.checked else "☐ ") if multi and option.checked is not None else ""
+    number = f"*{option.number}.* " if option.number is not None else "• "
+    line = f"{box}{number}{escape(_one_line(option.label))}"
+    if option.description:
+        line += f" — _{escape(truncate(option.description, 300))}_"
+    return line
+
+
+def _actions(block_id: str, elements: list) -> list:
+    """Actions blocks of at most 25 elements (Slack's limit)."""
+    return [{"type": "actions", "block_id": f"{block_id}{i // 25 or ''}", "elements": elements[i:i + 25]}
+            for i in range(0, len(elements), 25)]
+
+
+def dialog_blocks(name: str, workspace_label: str, dialog: Dialog | None, token: str, *,
+                  plan_text: str | None = None, full_id: str | None = None,
+                  screen_tail: Sequence[str] = (), note: str | None = None) -> list:
+    """A blocked agent's dialog with one button per option, or a keypad when it was not parsed.
+    Button values stay small (`{"t": token, "o": ...}`); the token names the pending record."""
+    blocks: list = [section(dialog_header(name, workspace_label))]
+    if note:
+        blocks.append(context(escape(note)))
+    if dialog is None or (dialog.kind == KIND_UNKNOWN and not dialog.options):
+        if screen_tail:
+            blocks.append(section(_code(list(screen_tail)[-KEYPAD_TAIL_LINES:], SECTION_MAX)))
+        keys = [_button(label, f"{ACTION_DIALOG_KEY}{key}", _dialog_value(token, key)) for key, label in KEYPAD_KEYS]
+        keys.append(_button("Show screen", ACTION_DIALOG_SCREEN, _dialog_value(token, "screen")))
+        blocks.extend(_actions(BLOCK_DIALOG_OPTIONS, keys))
+        return blocks
+    if dialog.tabs:
+        blocks.append(context(" · ".join(f"{'☒' if done else '☐'} {escape(tab)}" for tab, done in dialog.tabs)))
+    parts = [f"*{escape(dialog.title)}*"] if dialog.title else []
+    if dialog.kind == KIND_PLAN:
+        text = plan_text if plan_text is not None else "\n".join(dialog.body)
+        body, truncated = truncate_text(to_mrkdwn(text), PLAN_MAX_CHARS)
+        if body.count("```") % 2 == 1:
+            body += "\n```"
+        blocks.append(section("\n".join(parts + [body or "_(empty plan)_"])))
+        if truncated and full_id:
+            blocks.append({"type": "actions", "block_id": "dialog_full", "elements": [
+                _button("전체 보기", ACTION_SHOW_FULL, full_id)]})
+        parts = []
+    elif dialog.body:
+        if dialog.kind in (KIND_TRUST, KIND_QUESTION_REVIEW):
+            body, _ = truncate_text(escape("\n".join(dialog.body)), DIALOG_BODY_MAX)
+        else:
+            body = _code(dialog.body, DIALOG_BODY_MAX)
+        parts.append(body)
+    if dialog.question:
+        parts.append(f"*{escape(truncate(dialog.question, 1500))}*")
+    for chunk in chunk_lines(parts):
+        blocks.append(section(chunk))
+    for chunk in chunk_lines([_option_line(o, dialog.multi_select) for o in dialog.options]):
+        blocks.append(section(chunk))
+    buttons = []
+    for i, option in enumerate(dialog.options):
+        action = ACTION_DIALOG_TEXT if option.free_text else ACTION_DIALOG_OPTION
+        buttons.append(_button(option_button_text(option, dialog.multi_select), f"{action}{i}",
+                               _dialog_value(token, i)))
+    blocks.extend(_actions(BLOCK_DIALOG_OPTIONS, buttons))
+    controls = []
+    if dialog.multi_select:
+        # Submit the question from its Submit row; `right` only when that row was not found.
+        key = "submit" if dialog.submit_after is not None else "right"
+        controls.append(_button("Next →", f"{ACTION_DIALOG_KEY}{key}", _dialog_value(token, key)))
+    controls.append(_button("Esc", f"{ACTION_DIALOG_KEY}esc", _dialog_value(token, "esc")))
+    controls.append(_button("Show screen", ACTION_DIALOG_SCREEN, _dialog_value(token, "screen")))
+    blocks.extend(_actions(BLOCK_DIALOG_CONTROLS, controls))
+    return blocks[:MAX_BLOCKS]
+
+
+def dialog_summary(dialog: Dialog | None) -> str:
+    """One short line naming the dialog (kept in the pending record for the closed message)."""
+    if dialog is None:
+        return "Waiting for input"
+    text = " — ".join(p for p in (dialog.title, dialog.question) if p)
+    return truncate(" ".join(text.split()), 300) or dialog.kind
+
+
+def dialog_closed_blocks(name: str, workspace_label: str, summary: str, outcome: str) -> list:
+    """The dialog message once it is no longer open: no buttons, just what happened."""
+    return [section(f"💬 *{escape(name)}* · {escape(workspace_label)}"),
+            context(escape(summary)),
+            section(outcome)]
+
+
+def without_actions(blocks: Sequence[Mapping], note: str) -> list:
+    """A message's blocks with its buttons removed and a note appended."""
+    out = [dict(b) for b in blocks if b.get("type") != "actions"]
+    out.append(context(escape(note)))
+    return out
+
+
+def screen_blocks(lines: Sequence[str]) -> list:
+    return [section(_code(list(lines), SECTION_MAX))] if lines else [section("_(the screen is empty)_")]
+
+
+def dialog_unconfirmed_blocks(token: str) -> list:
+    return [section("⚠️ Could not confirm the answer; check the screen."),
+            {"type": "actions", "block_id": BLOCK_DIALOG_CONTROLS, "elements": [
+                _button("Show screen", ACTION_DIALOG_SCREEN, _dialog_value(token, "screen"))]}]
+
+
+def typed_notice(typed: str, sent: bool = False) -> str:
+    """Says that text is appended to what a multi-select row already holds, and shows the row's text:
+    before sending (modal) what it holds, after a thread reply what it holds now."""
+    if sent:
+        head = "✏️ Your reply was *added after* the text this row already held (nothing was cleared). Current text:"
+    else:
+        head = ("✏️ This row already holds typed text. What you send is *added after it* (nothing is cleared). "
+                "Current text:")
+    return head + "\n" + _code(typed.split("\n"), 1500)
+
+
+def dialog_text_view(token: str, index: int, name: str, label: str, question: str = "",
+                     where: Mapping | None = None, typed: str | None = None) -> dict:
+    """Modal for a free-text option ("Type something." / "Tell Claude what to change"). `where`
+    ({"c": channel, "m": message ts, "th": thread ts}) travels in the metadata so replies after the
+    submission land in the dialog's thread. `typed`: text already in the row (appended to)."""
+    shown = "Type something" if typed else _one_line(label)
+    blocks = [section(f"*{escape(name)}* · {escape(truncate(shown, 200))}")]
+    if question:
+        blocks.append(context(escape(truncate(question, 500))))
+    if typed:
+        blocks.append(section(typed_notice(typed)))
+    blocks.append(_input(BLOCK_DIALOG_TEXT, "Answer", _text_input(ACTION_VALUE, multiline=True)))
+    return {
+        "type": "modal",
+        "callback_id": DIALOG_TEXT_CALLBACK,
+        "title": plain("Answer agent"[:MODAL_TITLE_MAX]),
+        "submit": plain("Send"),
+        "close": plain("Cancel"),
+        "private_metadata": json.dumps({"t": token, "o": index, **dict(where or {})})[:3000],
+        "blocks": blocks,
+    }
+
+
+def notice_view(title: str, text: str) -> dict:
+    return {"type": "modal", "title": plain(title[:MODAL_TITLE_MAX]), "close": plain("OK"),
+            "blocks": [section(text)]}
+
+
+def parse_dialog_text_view(view: Mapping) -> tuple[str | None, int | None, str, dict]:
+    """(token, option index, text, where) from a submitted free-text modal."""
+    try:
+        meta = json.loads(view.get("private_metadata") or "{}")
+        token, index = meta.get("t"), int(meta.get("o"))
+    except (ValueError, TypeError, AttributeError):
+        meta, token, index = {}, None, None
+    where = {k: meta.get(k) for k in ("c", "m", "th") if isinstance(meta, dict) and meta.get(k)}
+    values = ((view.get("state") or {}).get("values") or {})
+    text = _value((values.get(BLOCK_DIALOG_TEXT) or {}).get(ACTION_VALUE) or {}) or ""
+    return token, index, text, where
 
 
 def result_blocks(header: str, context_parts: Sequence[str], body: str, result_id: str | None,

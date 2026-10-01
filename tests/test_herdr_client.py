@@ -58,6 +58,8 @@ def test_read_line_handles_chunks_and_leftovers():
      ["agent", "prompt", "a", "t", "--wait", "--until", "done", "--timeout", "5"]),
     ("agent.wait", {"target": "a", "until": ["idle", "done"]}, ["agent", "wait", "a", "--until", "idle", "--until", "done"]),
     ("agent.send_keys", {"target": "a", "keys": ["esc"]}, ["agent", "send-keys", "a", "esc"]),
+    ("agent.send_keys", {"target": "w1:p1", "keys": ["down", "enter"]}, ["agent", "send-keys", "w1:p1", "down", "enter"]),
+    ("pane.send_text", {"pane_id": "w1:p1", "text": "감마 two words"}, ["pane", "send-text", "w1:p1", "감마 two words"]),
     ("tab.create", {"workspace_id": "w1", "label": "slack-1 hi", "cwd": "D:\\x", "focus": False},
      ["tab", "create", "--workspace", "w1", "--cwd", "D:\\x", "--label", "slack-1 hi", "--no-focus"]),
     ("tab.list", {"workspace_id": "w1"}, ["tab", "list", "--workspace", "w1"]),
@@ -163,6 +165,38 @@ def test_client_request_shapes():
         ("agent.prompt", {"target": "slack-1", "text": "hello"}),
         ("tab.create", {"workspace_id": "w1", "label": "slack-1 hello", "cwd": None, "focus": False}),
     ]
+
+
+def test_client_input_request_shapes():
+    t = ScriptedTransport([{"type": "ok"}, {"type": "ok"}])
+    c = HerdrClient(t)
+    c.send_keys("w1:p1", ("3",))
+    c.send_text("w1:p1", "hello")
+    assert t.requests == [("agent.send_keys", {"target": "w1:p1", "keys": ["3"]}),
+                          ("pane.send_text", {"pane_id": "w1:p1", "text": "hello"})]
+
+
+def test_cli_send_text_prints_nothing_send_keys_prints_the_envelope(monkeypatch):
+    """Verified live on Herdr 0.8.2: `pane send-text` prints nothing, `agent send-keys` prints
+    {"result": {"type": "ok"}}."""
+    def fake_run(argv, **kw):
+        if argv[1:3] == ["agent", "send-keys"]:
+            return FakeProc(0, stdout=b'{"result":{"type":"ok"}}\n')
+        return FakeProc(0, stdout=b"")
+    monkeypatch.setattr(hc.subprocess, "run", fake_run)
+    client = HerdrClient(CliTransport("herdr"))
+    assert client.send_keys("a", ["1"]) == {"type": "ok"}
+    assert client.send_text("w1:p1", "x")["type"] == "ok"
+    with pytest.raises(HerdrError):
+        client.list_agents()  # other methods still need the JSON envelope
+
+
+def test_cli_send_text_keeps_text_positional():
+    """No `--` separator: the CLI would type it literally; leading dashes are typed as they are."""
+    assert cli_args("pane.send_text", {"pane_id": "w1:p1", "text": "-v please"}) == \
+        ["pane", "send-text", "w1:p1", "-v please"]
+    assert cli_args("pane.send_text", {"pane_id": "w1:p1", "text": "--dry\nrun"}) == \
+        ["pane", "send-text", "w1:p1", "--dry\nrun"]
 
 
 def test_auto_transport_falls_back_to_cli(monkeypatch):

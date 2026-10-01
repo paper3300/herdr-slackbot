@@ -47,6 +47,13 @@ class RecordingBridge:
     def handle_dm_message(self, channel, user, text, ts, thread_ts):
         self.calls.append(("dm", channel, user, text, ts, thread_ts))
 
+    def dialog_action(self, action_id, value, trigger_id, channel, message):
+        self.calls.append(("dialog", action_id, value, trigger_id, channel, message.get("ts")))
+
+    def submit_dialog_text(self, view):
+        self.calls.append(("submit_dialog_text", view["id"]))
+        return self.view_errors
+
 
 def authorize(**kwargs):
     return AuthorizeResult(enterprise_id=None, team_id="T1", bot_token="xoxb-test", bot_id="B1", bot_user_id="UBOT")
@@ -132,7 +139,7 @@ def test_other_slash_command_is_not_handled(setup):
     assert bridge.calls == []
 
 
-@pytest.mark.parametrize("callback", [B.NEW_CALLBACK, B.SEND_CALLBACK])
+@pytest.mark.parametrize("callback", [B.NEW_CALLBACK, B.SEND_CALLBACK, B.DIALOG_TEXT_CALLBACK])
 def test_view_submission_errors_and_success(setup, callback):
     app, bridge, _ = setup
     bridge.view_errors = {"name": "bad"}
@@ -155,6 +162,16 @@ def test_mute_and_show_full_actions(setup):
     dispatch(app, block_action(OWNER, B.ACTION_MUTE, '{"s": "S1", "m": true}'))
     dispatch(app, block_action(OWNER, B.ACTION_SHOW_FULL, "abc"))
     assert bridge.calls == [("mute", "D1", "1.0", '{"s": "S1", "m": true}'), ("show_full", "D1", "abc")]
+
+
+@pytest.mark.parametrize("action_id", [f"{B.ACTION_DIALOG_OPTION}0", f"{B.ACTION_DIALOG_OPTION}12",
+                                       f"{B.ACTION_DIALOG_TEXT}3", f"{B.ACTION_DIALOG_KEY}esc",
+                                       B.ACTION_DIALOG_SCREEN])
+def test_dialog_actions_routed(setup, action_id):
+    app, bridge, _ = setup
+    resp = dispatch(app, block_action(OWNER, action_id, '{"t": "tok", "o": 0}'))
+    assert resp.status == 200
+    assert bridge.calls == [("dialog", action_id, '{"t": "tok", "o": 0}', "TRIG", "D1", "1.0")]
 
 
 def test_dm_messages_routed_and_filtered(setup):
@@ -182,6 +199,10 @@ def test_guard_command(setup):
     block_action(STRANGER, B.ACTION_NEW_WS, view={"id": "V1", "type": "modal", "state": {"values": {}}}),
     view_submission(STRANGER, B.NEW_CALLBACK),
     view_submission(STRANGER, B.SEND_CALLBACK),
+    view_submission(STRANGER, B.DIALOG_TEXT_CALLBACK),
+    block_action(STRANGER, f"{B.ACTION_DIALOG_OPTION}0", '{"t": "tok", "o": 0}'),
+    block_action(STRANGER, f"{B.ACTION_DIALOG_KEY}enter", '{"t": "tok", "o": "enter"}'),
+    block_action(STRANGER, B.ACTION_DIALOG_SCREEN, '{"t": "tok", "o": "screen"}'),
     message_event(STRANGER, "let me in", thread_ts="1.0"),
     {"type": "block_suggestion", "team": {"id": "T1"}, "user": {"id": STRANGER}, "api_app_id": "A1",
      "action_id": "x", "block_id": "b", "value": "q"},

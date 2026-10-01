@@ -32,15 +32,15 @@ Bot DM features:
 ### Send (D5, D6)
 - Targets agent panes only (`herdr agent list`); no shell panes, no `pane run`.
 - Dropdown label: `<status emoji> · <name or pane_id> · <workspace label> · <status> · <terminal title>` (truncate to Slack's 75-char option text limit).
-- Accept only `idle` / `done`. `working` → DM "busy". `blocked` (or Herdr `agent_blocked` error) → DM "needs confirmation on PC". `unknown` → reject.
+- Accept only `idle` / `done`. `working` → DM "busy". `blocked` (or Herdr `agent_blocked` error) → DM "waiting for an answer: use the buttons in its thread, or answer on PC" (`/send` command and modal). `unknown` → reject. A **thread reply** while the thread's dialog is open is not rejected: it is the dialog's free-text answer (see "Blocked dialogs" below).
 
 ### Threads (D7, D8, D9, D11)
 - One DM thread per agent, bound to `agent_session` id (not pane).
 - Slack-send confirmation message is the thread root; post "⏳ started (working)" reply; on completion (idle or done) post result as thread reply. Completion detected via event subscription, no timeout.
 - Notify for ALL agents, including PC-originated ones; thread created on first notification. `[🔕 mute]` button per agent thread (persist muted sessions).
-- PC-originated agents: notify on `working → done` only (unseen tab); skip `working → idle`. No min-duration filter. `blocked` → notify for all agents ("⚠️ confirm on PC", no buttons).
+- PC-originated agents: notify on `working → done` only (unseen tab); skip `working → idle`. No min-duration filter. `blocked` → notify for all agents with the dialog and answer buttons (see "Blocked dialogs" below).
 - Slack-originated tasks always get a completion reply regardless of mute.
-- Thread reply = `/herdr send <thread's agent> <text>` with D6 rules. If agent exited or pane now hosts a different agent_session → reject with notice.
+- Thread reply = `/herdr send <thread's agent> <text>` with D6 rules (except while a dialog is open: then it answers the dialog's free-text option, or gets "This question needs one of the buttons above."). If agent exited or pane now hosts a different agent_session → reject with notice.
 - Plain DM messages outside threads → ignore + show usage.
 - Persist thread map (agent_session → channel, thread_ts, origin, muted) in STATE_DIR (JSON, atomic write).
 
@@ -49,7 +49,7 @@ Bot DM features:
 - Claude parse: strip everything from the prompt box (`───` line / `❯` prompt line at the bottom) downward; the response sits between the echoed `❯ <prompt>` line and `✻ ... done`-style line; take the last `●` block through the `✻ …` line; if a `※ recap` line exists, put it on top as summary.
 - Fallback (codex, parse failure): raw last N non-blank lines (e.g. 40).
 - Over 3000 chars → truncate + `[전체 보기]` button that uploads the full text as `.md` file into the thread (`files_upload_v2`).
-- Header: `✅ <name> · <workspace label> · <duration>` plus small context line with cwd / terminal title. Blocked: `⚠️ <name> · … needs confirmation on PC`.
+- Header: `✅ <name> · <workspace label> · <duration>` plus small context line with cwd / terminal title. Blocked: `⚠️ <name> · <workspace label> is waiting for your answer` + the dialog.
 - Parser must be a pure function with unit tests (use fixture transcripts; include long / multi-tool outputs).
 
 ### Runtime / hosting (D12, D14, D15)
@@ -87,6 +87,51 @@ Bot DM features:
 - **Mute vs blocked (clarifies D8/D9):** mute suppresses `blocked` alerts too for PC-originated work. A pending Slack-originated task always notifies (blocked and completion) regardless of mute.
 - **blocked → done (extends D9):** for PC-originated agents, `blocked → done` counts as a completion notification, same as `working → done`.
 - **Codex options (orchestrator default):** effort `low|medium|high|xhigh|max`, default `high`. Model dropdown = models with `visibility: "list"` from `~/.codex/models_cache.json` (fallback to a static list), default = `model` in `~/.codex/config.toml` (fallback first listed). No permission-mode field for codex (uses the user's codex config).
+
+## Blocked dialogs (docs/progress/BLOCKED-ANSWER.md, 2026-09-30)
+Replaces "confirm on PC": a blocked agent's dialog is answered from Slack.
+- Covered: Claude permission prompts, AskUserQuestion (single / multi-select / several questions /
+  free text), plan approval, Claude folder trust at startup (`agent start` → `agent_not_ready`), Codex
+  command approval, Codex folder trust at startup (reported `idle`: detected on screen), and a keypad
+  (`1`–`4`, `↑`, `↓`, Enter, Esc + the last 15 screen lines) when the screen cannot be parsed.
+  "Always allow" / "don't ask again" options are shown like any other option.
+- Parser: `dialog.py` (pure) → kind, title, body, question, options (number, label, description,
+  checked, free_text, chat, cursor), tabs, plan file, fingerprint (cursor moves and footer hints
+  excluded; checkbox states included). Keys: the option's digit; unnumbered menus `up`/`down` + Enter.
+- Message: one button per option (`"<n>. <label>"`, ≤75 chars; the full label stays in the text),
+  multi-select ☐/☑ + [Next →] (cursor to the Submit row + Enter), free-text options open a modal, always
+  [Esc] and [Show screen].
+  Plan text comes from the plan file named in the dialog footer (else the screen), with [전체 보기].
+  Button values carry only `{"t": token, "o": option index | key}`.
+- Pending record in the thread entry (`dialog`): token, fingerprint, kind, options, message ts, agent
+  session / terminal / pane. Before sending keys the live agent must be the same session, still
+  blocked (or showing the idle startup dialog) with the same fingerprint; otherwise nothing is sent and
+  the message is updated. The fingerprint covers the title and body too (a plan above the dialog's rule),
+  and a plan approval also compares a hash of the plan file. Answers per agent are serialized with its
+  transition handling (answer lock keyed by terminal id, taken before the admission lock). The message
+  and record are built once per post op and persisted (`dialog_pending`) before the first attempt.
+  A click whose token is not open leaves a live (re-rendered) or closed dialog message alone
+  ("That button was out of date"); closed message ts are kept in `closed_dialogs`.
+- After the keys the bridge polls (0.3 s, up to 5 s): a new dialog that reads the same twice → the
+  same message is edited (next question, toggled box, review, re-plan); agent no longer blocked →
+  `✅ <choice> — answered from Slack`; no change → buttons kept + "⚠️ Could not confirm the answer".
+- Transitions reconcile the record with the live agent: no longer blocked or a different dialog →
+  `✅ answered on PC`; session ended → `⏹ ended`; buttons removed, record dropped.
+- New agent blocked at startup: its thread is opened with the dialog and the prompt is kept
+  (`deferred_prompt`); it is sent (once) when the dialog is answered and the agent is idle.
+- Free text (verified live): single-select / plan: digit, `pane.send_text` (newlines as they are: they break
+  the line, they do not submit; CRLF → LF), Enter. Multi-select: a digit only toggles, so the cursor is
+  moved onto the Type something row with up/down, then the text is typed (it checks the box) and no
+  Enter is pressed (Enter would uncheck it). A newline typed there breaks the line too (verified live).
+  After typing, the row shows the text instead of "Type something"; it is recognized only on evidence
+  (the record it was answered from had its free-text row at that position; otherwise it stays a plain
+  toggle) and its label is the typed text. More text is appended (no clearing key); the modal and the
+  thread-reply notice say so and show the current text. Text is passed positionally to the CLI
+  (no `--`). Restart / idle-recheck reconciles re-render a changed dialog that is still waiting (no
+  transition would post it); a transition closes it (its `blocked` transition posts the new one).
+- Recovery without a transition: at start the bridge reconciles every open dialog / deferred prompt;
+  idle dialogs (Codex trust) are rechecked when the notifier has been idle for 15 s. A timeout re-renders
+  the buttons under a new token, so a click queued behind the answer cannot press the key again.
 
 ## Release additions (docs/progress/RELEASE.md)
 - **Owner pairing (R2):** tokens are required, the owner is not. Without `SLACK_OWNER_USER_ID` the bridge

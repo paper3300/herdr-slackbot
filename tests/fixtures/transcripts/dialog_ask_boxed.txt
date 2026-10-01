@@ -1,0 +1,28 @@
+
+ ▐▛███▛█   Claude Code v2.1.285
+▝▜██████▀  Opus 4.5 · Claude Pro
+ ▝▝   ▝▝   D:\work\demo
+
+
+❯ Which storage backend should the demo service use? Ask me before you decide.
+
+  Read 3 files
+
+● I will ask which backend to use before wiring anything up.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Storage
+
+│ The demo service currently keeps everything in memory. Which backend should I wire up for persistence? Each option changes the setup steps
+│ in the README.
+
+❯ 1. SQLite file
+     Zero setup, a single file next to the service. Good for local demos and tests.
+  2. PostgreSQL
+     Needs a running server and a connection string. Closest to production.
+  3. Keep it in memory
+     No persistence. Data is lost on restart, which is fine for throwaway demos.
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

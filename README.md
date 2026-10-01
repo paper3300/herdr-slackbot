@@ -1,203 +1,208 @@
 # herdr-slackbot
 
-[Herdr](https://herdr.dev) 플러그인입니다. **내 PC의 Herdr 에이전트(Claude Code / Codex)를 Slack 봇 DM으로 연결**합니다.
+**English** | [한국어](README.ko.md)
 
-- 에이전트가 작업을 끝내거나(✅ done) PC에서 확인이 필요할 때(⚠️ blocked) DM으로 알려 줍니다. 결과 본문도 함께 옵니다.
-- Slack에서 슬래시 명령으로 에이전트 목록을 보고, 새 에이전트를 띄우고, 실행 중인 에이전트에 프롬프트를 보낼 수 있습니다.
-- 에이전트마다 DM 스레드가 하나씩 생기고, 그 스레드에 답장하면 해당 에이전트에게 프롬프트로 전달됩니다.
+A [Herdr](https://herdr.dev) plugin that **connects the Herdr agents on your PC (Claude Code / Codex) to a Slack bot DM**.
 
-사용자 한 명(PC 한 대)마다 **자기 전용 Slack 앱**을 하나 만듭니다. 봇은 페어링한 **본인 Slack 계정의 요청만** 처리합니다.
+- Get a DM when an agent finishes (✅ done) or is waiting for an answer (⚠️ blocked), with the result text included.
+- Answer dialogs such as permission prompts, questions (AskUserQuestion) and plan approvals **straight from Slack buttons**.
+- Use a slash command in Slack to list agents, start new ones, and send prompts to running ones.
+- Each agent gets its own DM thread; replying in that thread sends your reply to the agent as a prompt.
+
+Every user (one PC) creates **their own Slack app**. The bot only handles requests from **the Slack account it is paired with**.
 
 ```
-Slack DM ──(Socket Mode)──> herdr-slackbot 브리지 ──(named pipe)──> Herdr ──> claude / codex 에이전트
-            (공개 URL 불필요)   (Herdr 워크스페이스 herdr-slack의 pane에서 실행)
+Slack DM ──(Socket Mode)──> herdr-slackbot bridge ──(named pipe)──> Herdr ──> claude / codex agents
+          (no public URL)     (runs in a pane of the Herdr workspace herdr-slack)
 ```
 
-## 스크린샷
+## Screenshots
 
-**Home 탭:** 봇을 열면 PC의 에이전트가 워크스페이스별로 보입니다. 각 줄에는 상태 이모지 · 이름/pane · 종류 · 상태 · 터미널 제목이 표시됩니다. 위쪽 버튼으로 새 에이전트를 띄우거나 프롬프트를 보낼 수 있고, idle/done인 에이전트는 줄마다 있는 **[보내기]**로 바로 보낼 수 있습니다.
+**Home tab:** Open the bot to see the agents on your PC, grouped by workspace. Each row shows status emoji · name/pane · kind · status · terminal title. The buttons at the top start a new agent or send a prompt, and idle/done agents have their own **[보내기]** (Send) button on the row.
 
-![Home 탭: 워크스페이스별 에이전트 목록과 새 에이전트 / 보내기 / 새로고침 버튼](docs/images/home-tab.png)
+![Home tab: agents grouped by workspace, with New agent / Send / Refresh buttons](docs/images/home-tab.png)
 
-**새 에이전트 (`/herdr new`, [➕ 새 에이전트]):** 고른 워크스페이스에 새 탭을 만들고 에이전트를 시작합니다. 모델·effort·권한 모드를 고를 수 있고, 기본값은 Opus · high · auto입니다. 이름을 비우면 `slack-<N>`이 붙습니다.
+**New agent (`/herdr new`, [➕ 새 에이전트]):** Opens a new tab in the chosen workspace and starts an agent there. You can pick the model, effort and permission mode; the defaults are Opus · high · auto. Leave the name blank to get `slack-<N>`.
 
-![새 에이전트 모달: Model, Effort, Permission mode, Name, Prompt 입력](docs/images/new-agent-modal.png)
+![New agent modal: Model, Effort, Permission mode, Name and Prompt fields](docs/images/new-agent-modal.png)
 
-**보내기 (`/herdr send`, [📤 보내기]):** 실행 중인 에이전트를 골라 프롬프트를 보냅니다. 에이전트를 고르면 그 에이전트의 마지막 응답이 모달에 표시됩니다. 작업 결과는 에이전트별 DM 스레드로 옵니다.
+**Send (`/herdr send`, [📤 보내기]):** Pick a running agent and send it a prompt. Once you pick an agent, its last response is shown in the modal. Results come back in that agent's DM thread.
 
-![보내기 모달: Agent 선택과 Prompt 입력](docs/images/send-modal.png)
+![Send modal: agent picker and Prompt field](docs/images/send-modal.png)
 
-## 빠른 시작
+> The Slack UI labels are currently in Korean: 새 에이전트 = New agent, 보내기 = Send, 새로고침 = Refresh, 전체 보기 = View full.
 
-1. **준비물:** Windows 10/11, **Herdr 0.8.2 이상**, **Python 3.11 이상**. Python이 없으면 먼저 설치합니다.
+## Quick start
+
+1. **Requirements:** Windows 10/11, **Herdr 0.8.2 or later**, **Python 3.11 or later**. Install Python first if you don't have it.
 
    ```powershell
    winget install Python.Python.3.12
    ```
 
-   Slack 워크스페이스에서 앱을 만들고 설치할 권한도 필요합니다. 관리자가 관리하는 워크스페이스에서는 앱 설치에 승인이 필요할 수 있습니다.
+   You also need permission to create and install apps in your Slack workspace. Workspaces managed by an admin may require approval to install apps.
 
-2. **플러그인 설치:** Herdr가 설치 단계에서 `scripts/setup.ps1`을 실행해 venv와 의존성, 설정 뼈대를 만듭니다.
+2. **Install the plugin:** During install, Herdr runs `scripts/setup.ps1`, which creates the venv, installs dependencies and writes the config skeleton.
 
    ```powershell
    herdr plugin install paper3300/herdr-slackbot
    ```
 
-3. **설정 마법사:** 현재 워크스페이스에 **Slack setup** 탭이 열리고 그 안에서 마법사가 실행됩니다.
+3. **Setup wizard:** A **Slack setup** tab opens in the current workspace and runs the wizard.
 
    ```powershell
    herdr plugin action invoke setup --plugin herdr-slackbot
    ```
 
-   Herdr 명령 팔레트에서 *Slack bridge: setup wizard* 액션을 골라도 같습니다. 플러그인 액션 자체는 입력을 받을 수 없어서(stdin이 연결되지 않음), 액션은 새 탭을 열고 그 탭의 셸에 마법사 명령을 입력합니다.
+   Picking the *Slack bridge: setup wizard* action from the Herdr command palette does the same. Plugin actions cannot read input themselves (stdin is not attached), so the action opens a new tab and types the wizard command into that tab's shell.
 
-마법사가 하는 일:
+What the wizard does:
 
-1. 설정 폴더에 `.env` 뼈대와 Slack 앱 manifest를 만듭니다. 슬래시 명령과 봇 이름은 `.env`에 값이 없을 때만 묻습니다. Enter를 누르면 괄호 안의 기본값을 씁니다.
-2. 브라우저로 Slack의 앱 만들기 화면을 엽니다. manifest가 미리 채워져 있으니 워크스페이스를 고르고 **Next → Create**만 누르면 됩니다. 링크와 manifest 파일 경로도 출력하므로, 브라우저가 안 열리거나 양식이 비어 있으면 파일 내용을 직접 붙여 넣습니다.
-3. 어느 페이지에서 무엇을 복사할지 알려 주고 토큰 두 개를 받습니다.
+1. Creates the `.env` skeleton and the Slack app manifest in the config folder. It asks for the slash command and bot name only when `.env` has no value for them. Press Enter to accept the default shown in brackets.
+2. Opens Slack's create-app page in your browser with the manifest prefilled; just pick the workspace and click **Next → Create**. It also prints the link and the manifest file path, so if the browser doesn't open or the form is empty, paste the file contents yourself.
+3. Tells you which page to copy from and asks for two tokens:
    - `xapp-...`: **Basic Information → App-Level Tokens → Generate Token and Scopes**, scope `connections:write`
-   - `xoxb-...`: **Install App → Install to Workspace** 후 *Bot User OAuth Token*
+   - `xoxb-...`: *Bot User OAuth Token* after **Install App → Install to Workspace**
 
-   받은 토큰은 Slack에 직접 확인합니다(`apps.connections.open`, `auth.test`). 틀리면 Slack이 돌려준 오류를 보여 주고 다시 묻습니다. `.env`에 이미 유효한 토큰이 있으면 건너뛰고, 바꿀지만 묻습니다. 토큰 전체를 화면에 다시 출력하지 않습니다.
-4. 토큰을 `.env`에 **제자리에서** 씁니다. 주석과 다른 값은 그대로 둡니다.
-5. 브리지를 시작합니다. 이미 돌고 있으면 재시작합니다.
-6. 아직 페어링하지 않았다면 페어링 코드를 보여 주고 페어링될 때까지(최대 10분) 기다립니다. 아래 **페어링**을 보세요.
-7. 슬래시 명령, 봇 DM 위치, 재시작·상태 확인 방법을 요약해 줍니다.
+   Tokens are verified against Slack directly (`apps.connections.open`, `auth.test`). If one is wrong, the wizard shows Slack's error and asks again. If `.env` already holds valid tokens, it skips this step and only asks whether to replace them. Tokens are never echoed back in full.
+4. Writes the tokens into `.env` **in place**, leaving comments and other values untouched.
+5. Starts the bridge, or restarts it if it is already running.
+6. If you haven't paired yet, shows the pairing code and waits (up to 10 minutes) until pairing completes. See **Pairing** below.
+7. Prints a summary: the slash command, where to find the bot DM, and how to restart and check status.
 
-Ctrl+C로 언제든 멈출 수 있습니다. 그때까지 입력한 값은 `.env`에 남아 있고, 다시 실행하면 이어서 진행합니다.
+You can stop at any time with Ctrl+C. Whatever you entered so far stays in `.env`, and running the wizard again picks up where you left off.
 
-## 페어링 (본인 Slack 계정 연결)
+## Pairing (linking your Slack account)
 
-봇이 누구의 요청을 받을지는 `.env`의 `SLACK_OWNER_USER_ID`로 정합니다. 멤버 ID를 직접 찾을 필요는 없습니다. 값이 비어 있으면 브리지가 **페어링 모드**로 시작합니다.
+`SLACK_OWNER_USER_ID` in `.env` decides whose requests the bot accepts. You don't need to look up your member ID: when the value is empty, the bridge starts in **pairing mode**.
 
-1. 브리지가 6자리 코드를 만듭니다. 코드는 `herdr-slack` 워크스페이스의 브리지 pane에 크게 표시되고, Herdr 알림("Slack pairing code: NNNNNN")으로도 뜹니다. 마법사를 쓰는 중이면 마법사 화면에도 나옵니다.
-2. Slack 왼쪽 **앱** 목록에서 봇을 열고, DM 창에서 다음을 보냅니다.
+1. The bridge generates a 6-digit code. It is shown in large type in the bridge pane of the `herdr-slack` workspace and as a Herdr notification ("Slack pairing code: NNNNNN"). If you are running the wizard, it appears there too.
+2. Open the bot from the **Apps** list in Slack's sidebar and send this in the DM:
 
    ```
    /herdr-kim pair 123456
    ```
 
-3. "paired ✅"가 오면 브리지가 `.env`에 `SLACK_OWNER_USER_ID`를 써 넣고, **재시작 없이** 본인 전용 모드를 시작합니다. 준비가 끝나면 봇 DM으로 사용법 안내(👋 Paired!)가 옵니다. 그 전에 명령을 보내면 "still starting" 안내가 나옵니다. 시작에 실패하면(몇 번 다시 시도한 뒤) pane과 Herdr 알림, 마법사가 `restart`를 하라고 알려 줍니다. 저장된 계정으로 정상 시작합니다.
+3. When "paired ✅" comes back, the bridge writes `SLACK_OWNER_USER_ID` to `.env` and switches to owner-only mode **without a restart**. When it is ready, the bot DMs you a usage guide (👋 Paired!). Commands sent before that get a "still starting" notice. If startup fails (after a few retries), the pane, a Herdr notification and the wizard tell you to run `restart`, which starts normally with the saved account.
 
-- 페어링 모드에서는 `pair` 명령만 받습니다. 다른 명령, 버튼, 모달, DM 메시지, Home 탭에는 "not paired yet" 안내만 보냅니다. 에이전트 알림도 페어링 후에 시작합니다.
-- 코드는 15분이 지나거나 틀린 코드가 모두 5번 들어오면 새 코드로 바뀝니다(pane과 알림에 다시 표시). 또 Slack 사용자 한 명이 10분 안에 5번 틀리면 **그 사람만** 10분 동안 시도할 수 없습니다. 틀린 적이 없는 사람(본인)은 막히지 않으므로, 누가 코드를 찍어 보더라도 본인의 페어링을 막을 수 없습니다.
-- 한 번 페어링하면 `pair`도 다른 사람의 요청처럼 거절합니다. **다른 계정으로 다시 페어링**하려면 `.env`에서 `SLACK_OWNER_USER_ID=` 값을 지우고 `restart` 액션을 실행합니다.
-- 페어링을 기다리는 동안 `status` 액션은 `slack: waiting for pairing (code in herdr-slack pane)`을 보여 줍니다. 페어링 후에는 브리지가 실제로 본인 전용 모드로 돌고 있을 때만 `slack: ready (owner U...)`가 나옵니다. `.env`에 멤버 ID만 있고 브리지가 준비되지 않았으면 `not ready`, 시작에 실패했으면 `owner mode failed to start`로 표시합니다. 마법사도 브리지가 준비됐다고 알릴 때까지(최대 60초) 기다린 뒤에만 성공이라고 말합니다.
+- In pairing mode only the `pair` command is accepted. Other commands, buttons, modals, DM messages and the Home tab only get a "not paired yet" notice. Agent notifications also start only after pairing.
+- The code is replaced after 15 minutes or after 5 wrong attempts in total (the new code is shown in the pane and a notification). In addition, a Slack user who gets it wrong 5 times within 10 minutes is locked out for 10 minutes — **only that user**. Someone who hasn't guessed wrong (you) is never blocked, so nobody can stop you from pairing by guessing codes.
+- Once paired, `pair` is rejected like any other request from a non-owner. To **re-pair with a different account**, clear the value of `SLACK_OWNER_USER_ID=` in `.env` and run the `restart` action.
+- While waiting for pairing, the `status` action shows `slack: waiting for pairing (code in herdr-slack pane)`. After pairing, it shows `slack: ready (owner U...)` only when the bridge is actually running in owner-only mode. If `.env` has a member ID but the bridge isn't ready, it shows `not ready`; if startup failed, `owner mode failed to start`. The wizard also waits (up to 60 seconds) for the bridge to report ready before declaring success.
 
-## 수동 설정
+## Manual setup
 
-마법사를 쓰지 않을 때의 방법입니다. 마법사가 하는 일을 손으로 합니다.
+For when you don't use the wizard: do by hand what the wizard does.
 
-### 1. 설치
+### 1. Install
 
-GitHub에서 설치하려면 위의 `herdr plugin install`을 쓰면 됩니다. 저장소를 직접 받아 로컬 링크로 쓸 수도 있습니다.
+To install from GitHub, use `herdr plugin install` as above. You can also clone the repo and link it locally.
 
 ```powershell
 git clone https://github.com/paper3300/herdr-slackbot D:\Git\herdr-slackbot
 powershell -NoProfile -ExecutionPolicy Bypass -File D:\Git\herdr-slackbot\scripts\setup.ps1
 herdr plugin link D:\Git\herdr-slackbot
-herdr plugin list                                # herdr-slackbot ... enabled 확인
+herdr plugin list                                # check: herdr-slackbot ... enabled
 ```
 
-`link`로 설치했는데 venv가 없으면, 첫 시작 때 플러그인이 알아서 만듭니다. 이 경우에도 `setup` 액션(마법사)을 쓸 수 있습니다.
+If you installed with `link` and there is no venv, the plugin creates one on first start. The `setup` action (wizard) works in this case too.
 
-### `setup.ps1`이 하는 일
+### What `setup.ps1` does
 
-1. 플러그인 폴더에 `.venv`를 만들고 의존성(`slack_bolt`, `slack_sdk`)을 설치합니다.
-2. 기본값을 정합니다.
-   - 슬래시 명령: `/herdr-<윈도우 사용자명>` (소문자, 32자 이내)
-   - 봇 이름: `Herdr (<사용자명>)`
-3. 플러그인 설정 폴더(`herdr plugin config-dir herdr-slackbot`, 보통 `%APPDATA%\herdr\plugins\config\herdr-slackbot`)에 파일 두 개를 씁니다.
-   - `.env`: 설정 뼈대입니다. 파일이 이미 있으면 **기존 값은 절대 덮어쓰지 않고** 빠진 키만 덧붙입니다.
-   - `slack-app-manifest.json`: Slack 앱을 만들 때 붙여 넣을 manifest입니다.
-4. 다음에 할 일을 출력합니다.
+1. Creates `.venv` in the plugin folder and installs the dependencies (`slack_bolt`, `slack_sdk`).
+2. Picks defaults:
+   - Slash command: `/herdr-<windows username>` (lowercase, at most 32 characters)
+   - Bot name: `Herdr (<username>)`
+3. Writes two files to the plugin config folder (`herdr plugin config-dir herdr-slackbot`, usually `%APPDATA%\herdr\plugins\config\herdr-slackbot`):
+   - `.env`: the config skeleton. If the file already exists, it **never overwrites existing values** and only appends missing keys.
+   - `slack-app-manifest.json`: the manifest to paste when creating the Slack app.
+4. Prints the next steps.
 
-`setup.ps1`은 입력을 받지 않습니다(Herdr의 설치 단계로도 실행되기 때문입니다). `-Wizard`를 붙이면 설정 단계 대신 마법사를 실행하는데, 이때는 터미널에서 실행해야 합니다.
+`setup.ps1` does not read input (it also runs as Herdr's install step). With `-Wizard` it runs the wizard instead of the setup step; in that case run it from a terminal.
 
-슬래시 명령과 봇 이름은 옵션으로 바꿀 수 있습니다. `.env`에 이미 키가 있으면 빈 값이라도 그대로 두고, 옵션은 적용되지 않았다고 알려 줍니다. manifest는 항상 실제로 적용될 설정(빈 값이면 기본값)으로 만들어집니다.
+The slash command and bot name can be changed with options. If `.env` already has the key, even with an empty value, it is left as is and you are told the option was not applied. The manifest is always generated from the settings that will actually apply (defaults for empty values).
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1 -SlashCommand /herdr-kim -DisplayName "Herdr (김)"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1 -SlashCommand /herdr-kim -DisplayName "Herdr (Kim)"
 ```
 
-> 슬래시 명령 이름은 **Slack 워크스페이스 전체에서 겹치면 안 됩니다.** 같은 이름이면 가장 나중에 설치한 앱이 명령을 가져갑니다. 그래서 사용자마다 `/herdr-<이름>`처럼 다르게 정합니다.
+> Slash command names **must be unique across the whole Slack workspace.** If two apps use the same name, the most recently installed app takes the command. That's why each user picks a different name, such as `/herdr-<name>`.
 
-### 2. Slack 앱 만들기 (manifest 사용)
+### 2. Create the Slack app (from the manifest)
 
-1. <https://api.slack.com/apps> → **Create New App** → **From a manifest**를 누릅니다.
-2. 사용할 워크스페이스를 고릅니다.
-3. **JSON** 탭에서 기존 내용을 지우고 `slack-app-manifest.json`의 내용을 붙여 넣은 뒤 **Next** → **Create**를 누릅니다.
+1. Go to <https://api.slack.com/apps> → **Create New App** → **From a manifest**.
+2. Pick your workspace.
+3. On the **JSON** tab, replace the existing content with the contents of `slack-app-manifest.json`, then click **Next** → **Create**.
 4. **Basic Information** → **App-Level Tokens** → **Generate Token and Scopes**:
-   - 이름은 아무거나 넣고, scope는 `connections:write`를 추가한 뒤 Generate를 누릅니다.
-   - 나온 `xapp-...` 토큰이 `SLACK_APP_TOKEN`입니다.
-5. **Install App** → **Install to Workspace** → 허용을 누릅니다.
-   - **Bot User OAuth Token** `xoxb-...`이 `SLACK_BOT_TOKEN`입니다.
-6. Slack 왼쪽 **앱** 목록에서 방금 만든 봇을 열면 DM 창이 생깁니다. 메시지 탭이 막혀 있으면 앱 설정의 **App Home** → *Allow users to send Slash commands and messages from the messages tab*을 켭니다.
+   - Enter any name, add the `connections:write` scope and click Generate.
+   - The resulting `xapp-...` token is `SLACK_APP_TOKEN`.
+5. **Install App** → **Install to Workspace** → Allow.
+   - The **Bot User OAuth Token** `xoxb-...` is `SLACK_BOT_TOKEN`.
+6. Open the new bot from the **Apps** list in Slack's sidebar to get a DM window. If the messages tab is disabled, turn on **App Home** → *Allow users to send Slash commands and messages from the messages tab* in the app settings.
 
-manifest에는 아래 설정이 들어 있습니다. 코드에서 실제로 호출하는 Slack API를 기준으로 뽑았고, `tests/test_slack_manifest.py`가 코드와 어긋나지 않는지 검사합니다.
+The manifest contains the settings below. They are derived from the Slack APIs the code actually calls, and `tests/test_slack_manifest.py` checks that the two stay in sync.
 
-| 항목 | 값 |
+| Setting | Value |
 |---|---|
-| Socket Mode | 켜짐 (공개 URL이나 포트 개방이 필요 없음) |
-| Interactivity | 켜짐 (모달, 버튼) |
-| 이벤트 | `message.im` (DM 스레드 답장), `app_home_opened` (Home 탭 새로고침) |
-| App Home | Home 탭 켜짐, 메시지 탭 켜짐(입력 가능) |
-| 슬래시 명령 | `.env`의 `SLASH_COMMAND` |
-| Bot scopes | `chat:write` (메시지 전송·수정·ephemeral), `commands`, `im:write` (DM 열기), `im:history` (DM 메시지 수신), `files:write` ([전체 보기] 파일 업로드) |
+| Socket Mode | On (no public URL or open port needed) |
+| Interactivity | On (modals, buttons) |
+| Events | `message.im` (DM thread replies), `app_home_opened` (Home tab refresh) |
+| App Home | Home tab on, messages tab on (input allowed) |
+| Slash command | `SLASH_COMMAND` from `.env` |
+| Bot scopes | `chat:write` (post, update, ephemeral messages), `commands`, `im:write` (open DMs), `im:history` (receive DM messages), `files:write` ([전체 보기] / View full file upload) |
 
-#### 이미 만든 앱의 manifest 갱신하기 (예: Home 탭 추가)
+#### Updating the manifest of an existing app (e.g. to add the Home tab)
 
-새 버전에서 manifest가 바뀌면 이미 만든 Slack 앱에도 반영해야 합니다.
+When a new version changes the manifest, apply it to the Slack app you already created.
 
-1. `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1`를 실행합니다. 설정 폴더의 `slack-app-manifest.json`이 새로 만들어집니다. `.env` 값은 건드리지 않습니다.
-2. <https://api.slack.com/apps>에서 앱 → **App Manifest**를 엽니다. JSON 내용을 새 파일 내용으로 바꾸고 **Save Changes**를 누릅니다.
-3. Slack이 재설치를 요구하면(**Install App → Reinstall to Workspace**) 재설치합니다. 토큰이 바뀌었다면 `.env`도 고칩니다.
-4. `restart` 액션으로 브리지를 다시 시작합니다.
+1. Run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1`. It regenerates `slack-app-manifest.json` in the config folder without touching the values in `.env`.
+2. At <https://api.slack.com/apps>, open your app → **App Manifest**. Replace the JSON with the new file contents and click **Save Changes**.
+3. If Slack asks you to reinstall (**Install App → Reinstall to Workspace**), do so. If the tokens changed, update `.env` too.
+4. Restart the bridge with the `restart` action.
 
-### 3. `.env` 채우기
+### 3. Fill in `.env`
 
-`.env`는 플러그인 설정 폴더에 있습니다. 위치는 아래 명령으로 확인합니다.
+`.env` lives in the plugin config folder. Find it with:
 
 ```powershell
 herdr plugin config-dir herdr-slackbot
 notepad "$(herdr plugin config-dir herdr-slackbot)\.env"
 ```
 
-| 키 | 필수 | 설명 |
+| Key | Required | Description |
 |---|---|---|
-| `SLACK_BOT_TOKEN` | ✔ | `xoxb-...` (Install App 페이지) |
+| `SLACK_BOT_TOKEN` | ✔ | `xoxb-...` (Install App page) |
 | `SLACK_APP_TOKEN` | ✔ | `xapp-...` (App-Level Token, `connections:write`) |
-| `SLACK_OWNER_USER_ID` | | **본인** Slack 멤버 ID (`U`로 시작). 비워 두면 페어링으로 채워집니다. 이 사용자만 봇을 쓸 수 있습니다. |
-| `SLASH_COMMAND` | | 기본 `/herdr-<사용자명>`. **manifest의 명령과 같아야 합니다.** |
-| `BOT_DISPLAY_NAME` | | 기본 `Herdr (<사용자명>)` |
-| `STATE_DIR`, `LOG_LEVEL`, `RESULT_MAX_CHARS`, `FALLBACK_LINES`, `READ_LINES`, `BRIDGE_WORKSPACE`, `START_TIMEOUT_MS`, `CODEX_PROMPT_DELAY`, `STALL_WAIT`, `HERDR_BIN`, `HERDR_SOCKET_PATH` | | 선택 설정. 설명은 `.env.example`에 있습니다. |
+| `SLACK_OWNER_USER_ID` | | **Your** Slack member ID (starts with `U`). Leave it empty and pairing fills it in. Only this user can use the bot. |
+| `SLASH_COMMAND` | | Default `/herdr-<username>`. **Must match the command in the manifest.** |
+| `BOT_DISPLAY_NAME` | | Default `Herdr (<username>)` |
+| `STATE_DIR`, `LOG_LEVEL`, `RESULT_MAX_CHARS`, `FALLBACK_LINES`, `READ_LINES`, `BRIDGE_WORKSPACE`, `START_TIMEOUT_MS`, `CODEX_PROMPT_DELAY`, `STALL_WAIT`, `HERDR_BIN`, `HERDR_SOCKET_PATH` | | Optional settings, documented in `.env.example`. |
 
-토큰을 채운 뒤 `restart` 액션으로 브리지를 시작하고, 위의 **페어링**을 합니다. 멤버 ID를 직접 적어도 됩니다: Slack에서 내 프로필 사진 → **프로필** → 오른쪽 위 **⋮**(더보기) → **멤버 ID 복사**. `U0123ABCD` 같은 형태입니다.
+After filling in the tokens, start the bridge with the `restart` action and do the **Pairing** above. You can also enter your member ID yourself: in Slack, click your profile picture → **Profile** → **⋮** (More) at the top right → **Copy member ID**. It looks like `U0123ABCD`.
 
-`SLASH_COMMAND`를 바꿨다면 manifest도 다시 만들어 Slack 앱에 반영해야 합니다. `setup.ps1`을 다시 실행하면(위와 같은 `powershell -NoProfile -ExecutionPolicy Bypass -File ...` 형식) `slack-app-manifest.json`이 새로 생성됩니다. 그 내용을 앱 설정의 **App Manifest**에 붙여 넣고 저장합니다.
+If you changed `SLASH_COMMAND`, regenerate the manifest and apply it to the Slack app. Running `setup.ps1` again (with the same `powershell -NoProfile -ExecutionPolicy Bypass -File ...` form as above) regenerates `slack-app-manifest.json`; paste its contents into the app's **App Manifest** and save.
 
-## 시작 / 재시작
+## Start / restart
 
-- **자동 시작:** Herdr 서버가 시작될 때 플러그인 startup hook이 실행됩니다.
-  1. 워크스페이스 `herdr-slack`이 없으면 만듭니다. 이때 포커스는 가져가지 않습니다.
-  2. 그 워크스페이스의 pane에서 브리지(`python -m herdr_slackbot run`)를 실행합니다.
-  3. 브리지는 인스턴스 잠금(`STATE_DIR\bridge.lock`)을 잡기 때문에 두 개가 동시에 돌지 않습니다.
-  4. 시작·중지·재시작은 `STATE_DIR\lifecycle.lock` 하나로 한 번에 하나씩만 진행됩니다. 브리지도 시작할 때 같은 잠금 안에서 자기 잠금을 잡기 때문에, 상태는 항상 멈춤 / 시작 중 / 실행 중 셋 중 하나로 보입니다. 시작 중(최대 60초)에 들어온 다른 시작 요청은 무시되고, 이때 `stop`을 하면 그 시작이 취소됩니다.
-  5. 시작할 때마다 `herdr-slack`에 새 탭을 만들고(포커스는 가져가지 않음) 거기에만 명령을 입력합니다. 기존 pane에는 절대 입력하지 않습니다. 새 브리지가 시작을 확인하면 이전 브리지 탭을 닫는데, 다음을 모두 만족할 때만 닫습니다: 같은 Herdr 서버에 있고, 기록된 탭/pane/터미널 ID가 그대로이고, 탭에 pane이 하나뿐이고, 에이전트나 실행 중인 프로그램이 없습니다. 하나라도 어긋나면 그 탭은 그대로 둡니다.
-- startup hook은 Herdr 서버가 시작될 때만 실행됩니다. 그래서 `herdr plugin link`/`install` 직후에는 돌지 않습니다. 설정 마법사가 브리지를 시작해 주고, 마법사를 쓰지 않았다면 `start` 액션으로 바로 시작하세요.
-- **플러그인 액션:**
+- **Automatic start:** The plugin's startup hook runs when the Herdr server starts.
+  1. Creates the workspace `herdr-slack` if it doesn't exist, without taking focus.
+  2. Runs the bridge (`python -m herdr_slackbot run`) in a pane of that workspace.
+  3. The bridge holds an instance lock (`STATE_DIR\bridge.lock`), so two bridges never run at once.
+  4. Start, stop and restart are serialized through a single `STATE_DIR\lifecycle.lock`. The bridge takes its own lock inside the same lock at startup, so the state is always one of stopped / starting / running. Other start requests during a start (up to 60 seconds) are ignored, and a `stop` at that point cancels the start.
+  5. Each start creates a new tab in `herdr-slack` (without taking focus) and types the command only there — never into an existing pane. Once the new bridge confirms it started, it closes the previous bridge tab, but only if all of the following hold: it is on the same Herdr server, the recorded tab/pane/terminal IDs are unchanged, the tab has a single pane, and no agent or program is running in it. If anything doesn't match, the tab is left alone.
+- The startup hook only runs when the Herdr server starts, so it does not run right after `herdr plugin link`/`install`. The setup wizard starts the bridge for you; if you didn't use the wizard, start it right away with the `start` action.
+- **Plugin actions:**
 
   ```powershell
-  herdr plugin action invoke setup   --plugin herdr-slackbot   # 설정 마법사 (새 탭에서 실행)
-  herdr plugin action invoke start   --plugin herdr-slackbot   # 실행 중이면 아무것도 안 함
-  herdr plugin action invoke restart --plugin herdr-slackbot   # .env 수정 후
+  herdr plugin action invoke setup   --plugin herdr-slackbot   # setup wizard (runs in a new tab)
+  herdr plugin action invoke start   --plugin herdr-slackbot   # no-op if already running
+  herdr plugin action invoke restart --plugin herdr-slackbot   # after editing .env
   herdr plugin action invoke stop    --plugin herdr-slackbot
-  herdr plugin action invoke status  --plugin herdr-slackbot   # Herdr 알림으로도 표시
+  herdr plugin action invoke status  --plugin herdr-slackbot   # also shown as a Herdr notification
   ```
 
-  `stop`/`restart`는 터미널에 아무것도 입력하지 않습니다. 브리지가 남긴 `bridge.runtime.json`(pid와 프로세스 생성 시각)으로 실행 중인 브리지를 확인한 뒤, 그 프로세스 앞으로 `stop.request`를 남깁니다. 브리지는 이 요청을 1초마다 확인하고 스스로 정상 종료합니다. 15초 안에 끝나지 않으면 pid와 생성 시각이 여전히 맞는 경우에만 프로세스를 종료합니다. 확인이 안 되면 아무것도 하지 않고 알려 줍니다. 액션의 출력은 `herdr plugin log list --plugin herdr-slackbot`에서 볼 수 있습니다.
-- **단축키:** 플러그인 manifest로는 키를 지정할 수 없습니다. Herdr `config.toml`에 직접 추가하고 `herdr server reload-config`를 실행합니다.
+  `stop`/`restart` don't type anything into a terminal. They identify the running bridge from the `bridge.runtime.json` it leaves behind (pid and process creation time), then leave a `stop.request` addressed to that process. The bridge checks for the request every second and shuts down cleanly on its own. If it hasn't exited within 15 seconds, the process is killed — but only if the pid and creation time still match. If the bridge can't be verified, nothing is done and you are told so. Action output is available via `herdr plugin log list --plugin herdr-slackbot`.
+- **Key bindings:** The plugin manifest can't declare keys. Add them to your Herdr `config.toml` and run `herdr server reload-config`.
 
   ```toml
   [[keys.command]]
@@ -213,98 +218,112 @@ notepad "$(herdr plugin config-dir herdr-slackbot)\.env"
   description = "Slack bridge status"
   ```
 
-- **수동 실행:** 개발할 때는 아래처럼 직접 실행합니다.
+- **Running manually:** For development, run it directly:
 
   ```powershell
-  .venv\Scripts\python -m herdr_slackbot check     # 설정·Herdr 연결 점검
+  .venv\Scripts\python -m herdr_slackbot check     # check settings and the Herdr connection
   .venv\Scripts\python -m herdr_slackbot status
-  .venv\Scripts\python -m herdr_slackbot manifest  # 현재 설정 기준 manifest 출력
-  .venv\Scripts\python -m herdr_slackbot marker-check  # 실제 Slack에서 중복 방지 마커 왕복 확인
+  .venv\Scripts\python -m herdr_slackbot manifest  # print the manifest for the current settings
+  .venv\Scripts\python -m herdr_slackbot marker-check  # round-trip the duplicate-prevention marker through real Slack
   ```
 
-토큰이 없거나 틀려도 브리지는 죽거나 재시작을 반복하지 않습니다. `herdr-slack` pane에 이유와 다음 할 일을 한 번 출력하고 종료하며, 셸은 그대로 남습니다. 설정을 고친 뒤 `restart` 액션을 실행하면 됩니다.
+If tokens are missing or wrong, the bridge doesn't crash or restart in a loop. It prints the reason and what to do next in the `herdr-slack` pane once and exits, leaving the shell open. Fix the settings and run the `restart` action.
 
-처음 실제 Slack으로 돌려 볼 때는 `docs/LIVE_TEST.md`의 체크리스트를 순서대로 따라 하세요.
+For your first run against real Slack, follow the checklist in `docs/LIVE_TEST.md` in order.
 
-## Slack에서 쓰기
+## Using it in Slack
 
-아래에서 `/herdr`는 본인의 `SLASH_COMMAND`를 뜻합니다(예: `/herdr-kim`). 봇 DM 창에서 사용합니다.
+Below, `/herdr` stands for your own `SLASH_COMMAND` (e.g. `/herdr-kim`). Use it in the bot DM.
 
-| 명령 | 동작 |
+| Command | What it does |
 |---|---|
-| `/herdr` | 사용법 |
-| `/herdr list` | 에이전트 목록 (워크스페이스별, 상태 이모지) |
-| `/herdr new` | 모달로 새 에이전트 시작: 워크스페이스, cwd, 종류(claude/codex), 모델, effort, 권한 모드, 이름, 프롬프트 |
-| `/herdr new <workspace> [name=..] [kind=claude\|codex] [model=..] [effort=..] [mode=..] [cwd=..] <prompt>` | 모달 없이 바로 시작 |
-| `/herdr send` | 모달로 실행 중인 에이전트에 프롬프트 전송. 에이전트를 고르면 Agent와 Prompt 사이에 그 에이전트의 **마지막 응답**(시각·소요 시간 포함)이 표시됩니다. 길면 끝부분 약 2500자만 보여 줍니다. Home 탭의 보내기 버튼에서도 같은 모달이 열립니다. |
-| `/herdr send <에이전트 이름\|pane id> <prompt>` | 바로 전송 |
-| `/herdr status` | 브리지 상태 |
-| `/herdr pair <code>` | 페어링 모드에서 본인 계정 연결 (위의 **페어링** 참고). 페어링 후에는 거절됩니다. |
+| `/herdr` | Usage |
+| `/herdr list` | List agents (by workspace, with status emoji) |
+| `/herdr new` | Start a new agent from a modal: workspace, cwd, kind (claude/codex), model, effort, permission mode, name, prompt |
+| `/herdr new <workspace> [name=..] [kind=claude\|codex] [model=..] [effort=..] [mode=..] [cwd=..] <prompt>` | Start directly, without the modal |
+| `/herdr send` | Send a prompt to a running agent from a modal. Once you pick an agent, its **last response** (with time and duration) is shown between Agent and Prompt; long responses show only the last ~2500 characters. The Send button on the Home tab opens the same modal. |
+| `/herdr send <agent name\|pane id> <prompt>` | Send directly |
+| `/herdr status` | Bridge status |
+| `/herdr pair <code>` | Link your account in pairing mode (see **Pairing** above). Rejected once paired. |
 
-- **새 에이전트:** 선택한 워크스페이스에 새 탭을 만들고 거기서 시작합니다. 기본값은 claude `--model opus --effort high --permission-mode auto`입니다. 이름을 비우면 `slack-<N>`이 붙습니다.
-- **전송 규칙:** 대상이 `idle`/`done`일 때만 보냅니다.
-  - `working`이면 "busy"라고 답합니다.
-  - `blocked`이면 "PC에서 확인이 필요하다"고 답합니다.
-- **스레드:** 에이전트마다 DM 스레드가 하나씩 생깁니다.
-  - Slack에서 보낸 작업은 "⏳ started"와 완료 결과가 스레드 답장으로 옵니다.
-  - 스레드에 답장하면 그 에이전트에게 프롬프트로 전달됩니다.
-  - 에이전트가 종료되었거나 같은 pane에 다른 세션이 뜬 경우에는 전달하지 않고 안내만 합니다.
-- **알림:** PC에서 직접 시작한 에이전트도 알립니다.
-  - 보고 있지 않은 탭에서 끝난 작업(`done`)을 알립니다.
-  - `blocked` 상태가 되면 알립니다.
-  - 스레드의 🔕 버튼으로 해당 에이전트 알림을 끌 수 있습니다. Slack에서 보낸 작업의 결과는 음소거와 상관없이 옵니다.
-- **결과 본문:**
-  - claude는 세션 JSONL에서 마지막 답변을 읽고, 읽지 못하면 화면에서 파싱합니다. codex는 화면 끝부분을 보냅니다.
-  - 3000자가 넘으면 잘라서 보내고, **[전체 보기]** 버튼을 누르면 전체 내용을 `.md` 파일로 올립니다.
+- **New agent:** Creates a new tab in the chosen workspace and starts the agent there. Defaults are claude `--model opus --effort high --permission-mode auto`. A blank name gets `slack-<N>`.
+- **Send rules:** Prompts are sent only when the target is `idle`/`done`.
+  - `working` → replies "busy".
+  - `blocked` → tells you to answer with the buttons in the thread (`/herdr send`, modal).
+- **Threads:** Each agent gets one DM thread.
+  - For work sent from Slack, "⏳ started" and the final result arrive as thread replies.
+  - Replying in the thread sends the reply to that agent as a prompt. If the agent is waiting for an answer, the reply becomes the typed answer to that question (see **Answering dialogs** below).
+  - If the agent has exited or a different session now runs in the same pane, the reply is not forwarded and you get a notice instead.
+- **Notifications:** Agents started directly on the PC are covered too.
+  - Work that finishes (`done`) in a tab you aren't looking at is notified.
+  - When an agent becomes `blocked`, the dialog is posted with buttons.
+  - The 🔕 button in a thread mutes that agent. Results of work sent from Slack arrive regardless of mute.
+- **Result text:**
+  - For claude, the last answer is read from the session JSONL, falling back to parsing the screen. For codex, the end of the screen is sent.
+  - Over 3000 characters, the text is truncated and a **[전체 보기]** (View full) button uploads the full content as a `.md` file.
 
-### Home 탭
+### Answering dialogs
 
-Slack 왼쪽 **앱** 목록에서 봇을 열고 **홈** 탭을 누르면 대시보드가 나옵니다.
+When an agent becomes `blocked`, the thread gets a **"⚠️ <name> · <workspace> is waiting for your answer"** message. The bridge reads the dialog from the screen and adds a button for each option.
 
-- **맨 위:** 브리지 상태(uptime, 에이전트 수, 슬래시 명령, 갱신 시각)와 버튼 3개가 있습니다.
-  - **[➕ 새 에이전트]**: `/herdr new` 모달이 열립니다.
-  - **[📤 보내기]**: `/herdr send` 모달이 열립니다.
-  - **[🔄 새로고침]**: 화면을 즉시 다시 그립니다.
-- **아래:** 워크스페이스별 에이전트 목록(상태 이모지 · 이름/pane · 종류 · 상태 · 터미널 제목)이 있습니다. idle/done인 에이전트 줄의 **[보내기]**를 누르면, 그 에이전트가 미리 선택된 보내기 모달이 열립니다.
-- **자동 갱신:** 홈을 열 때마다 새로 그립니다. 한 번 연 뒤에는 에이전트 상태가 바뀔 때도 자동으로 갱신됩니다. 몰아서 최소 5초 간격으로 갱신합니다.
-- **표시 한도:** 한 화면에 블록 100개까지 표시되고, 넘치면 "외 N개"로 줄입니다.
-- **소유자 전용:** 다른 사용자가 홈 탭을 열면 아무것도 게시하지 않습니다. 그 사람에게 에이전트 정보는 보이지 않습니다.
+- **Supported:** Claude permission prompts (Bash etc.), AskUserQuestion (single choice, multiple choice, multiple questions, free text), plan approval (ExitPlanMode), the folder trust prompt at startup (Claude, Codex), and Codex command approval.
+- **Buttons:** Each option gets a button like `1. Yes`. "Always allow / don't ask again" options show up as buttons too. Multiple choice uses ☐/☑ toggle buttons, and **[Next →]** moves the cursor to the question's Submit row and presses Enter (the next question, or the review screen). **[Esc]** and **[Show screen]** (posts the last 40 lines of the screen to the thread) are always there.
+- **Free text:** The "Type something." / "Tell Claude what to change" button opens an input modal. Replying in the thread gives the same answer. Several lines are sent as they are (a line break only breaks the line in the agent's input; it does not submit). In a multiple-choice question the typed text also ticks the "Type something" box; press **[Next →]** to submit the question. Replying to a question without a free-text option gets "This question needs one of the buttons above."
+- **Plan approval:** The plan file (`~\.claude\plans\…md`) is read and its text shown; long plans get **[전체 보기]** (View full) to upload the whole thing.
+- **Safeguards:** Pressing a button first re-checks the agent and the screen. If you already answered on the PC or the question changed in the meantime (including a different plan behind the same approval question), no keys are sent and only the message is updated. Pressing twice still sends the keys once; a button from an older version of the message only gets "That button was out of date".
+- **After answering:** If another question follows, the same message is replaced with the new question. When the agent moves on, the message becomes `✅ <choice> — answered from Slack` and the buttons disappear. If you answer on the PC, it becomes `✅ answered on PC` (also after a bridge restart). If the screen doesn't change within 5 seconds, the buttons stay and you get "Could not confirm the answer".
+- **When the screen can't be read:** A keypad (`1`–`4`, `↑`, `↓`, Enter, Esc) and the last 15 lines of the screen are shown.
+- **If an agent started from Slack asks for folder trust right away:** A thread is created with that question, and the original prompt is sent after you answer.
+- **Codex:** If `~/.codex/config.toml` delegates approvals with `approvals_reviewer = "auto_review"`, Codex never shows an approval screen, so nothing reaches Slack either. That's configuration, not a bug.
 
-## 문제 해결
+### Home tab
 
-| 증상 | 확인할 것 |
+Open the bot from the **Apps** list in Slack's sidebar and click the **Home** tab for a dashboard.
+
+- **Top:** Bridge status (uptime, agent count, slash command, last update) and three buttons:
+  - **[➕ 새 에이전트]** (New agent): opens the `/herdr new` modal.
+  - **[📤 보내기]** (Send): opens the `/herdr send` modal.
+  - **[🔄 새로고침]** (Refresh): redraws immediately.
+- **Below:** Agents by workspace (status emoji · name/pane · kind · status · terminal title). The **[보내기]** (Send) button on an idle/done agent's row opens the send modal with that agent preselected.
+- **Auto refresh:** Redrawn every time you open Home. After you've opened it once, it also refreshes when agent status changes, batched to at most once every 5 seconds.
+- **Display limit:** Up to 100 blocks per view; the rest are collapsed into "외 N개" (N more).
+- **Owner only:** If another user opens the Home tab, nothing is published, so they never see agent information.
+
+## Troubleshooting
+
+| Symptom | What to check |
 |---|---|
-| 슬래시 명령에 반응이 없음 | 1. `herdr-slack` 워크스페이스 pane의 출력을 봅니다.<br>2. `status` 액션을 실행합니다.<br>3. `STATE_DIR\bridge.log`를 확인합니다. |
-| pane에 `missing settings in ...` | `.env`에 토큰 두 개(`SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`)를 채운 뒤 `restart` 액션을 실행합니다. 마법사(`setup` 액션)를 써도 됩니다. |
-| "🔗 This Herdr bridge is not paired yet" | 페어링 모드입니다. `herdr-slack` pane이나 Herdr 알림의 코드로 `/herdr pair <code>`를 보냅니다. |
-| "❌ Wrong pairing code" / "⌛ That code expired" | pane에 표시된 **가장 최근** 코드를 씁니다. 5번 틀리거나 15분이 지나면 코드가 바뀝니다. |
-| "⏳ Too many wrong codes from you" | 10분 안에 5번 틀렸습니다. 안내된 시간만큼 기다린 뒤 pane에 표시된 **가장 최근** 코드로 다시 보냅니다. |
-| "You are paired, but the bridge could not start" | 계정은 저장되었지만 본인 전용 모드 시작이 실패했습니다. pane의 오류를 확인하고 `restart` 액션을 실행합니다. |
-| `Slack connection failed: invalid_auth` | `xoxb`/`xapp` 토큰이 맞는지, 앱을 워크스페이스에 설치했는지, App-Level Token에 `connections:write`가 있는지 확인합니다. |
-| `/herdr-...`가 "dispatch_failed" 또는 다른 앱이 응답 | 브리지가 떠 있는지 확인합니다. 같은 이름의 명령을 쓰는 다른 앱이 있는지도 확인합니다(이름은 워크스페이스 전체에서 유일해야 함). |
-| "⛔ This Herdr bridge only accepts requests from its owner." | 다른 계정으로 페어링되어 있습니다. `.env`의 `SLACK_OWNER_USER_ID`를 비우고 `restart` 후 다시 페어링합니다. |
-| DM 창에 입력이 안 됨 | App Home의 messages tab 설정을 확인합니다(수동 설정 2단계 6번). |
-| `another bridge is running (pid N)` | 이미 실행 중입니다. `status` 액션으로 확인하고, 필요하면 `restart` 액션을 실행합니다. |
-| 마법사가 "needs a terminal"이라며 멈춤 | 입력을 받을 수 없는 곳(플러그인 로그, 파이프)에서 실행했습니다. `setup` 액션을 쓰거나 터미널에서 실행합니다. |
-| 플러그인 액션이 아무것도 안 하는 것 같음 | `herdr plugin log list --plugin herdr-slackbot`에서 stdout/stderr를 봅니다. |
-| venv가 깨짐 | 플러그인 폴더의 `.venv`를 지우고 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1`을 다시 실행합니다. |
-| `cannot verify the running bridge` | 실행 중인 브리지를 확인할 수 없어 멈추지 않은 경우입니다. `herdr-slack` 워크스페이스의 브리지 pane에서 Ctrl+C로 직접 멈춥니다. |
+| Slash command doesn't respond | 1. Look at the output in the `herdr-slack` workspace pane.<br>2. Run the `status` action.<br>3. Check `STATE_DIR\bridge.log`. |
+| `missing settings in ...` in the pane | Fill in both tokens (`SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`) in `.env` and run the `restart` action. You can also use the wizard (`setup` action). |
+| "🔗 This Herdr bridge is not paired yet" | Pairing mode. Send `/herdr pair <code>` with the code from the `herdr-slack` pane or the Herdr notification. |
+| "❌ Wrong pairing code" / "⌛ That code expired" | Use the **most recent** code shown in the pane. The code changes after 5 wrong attempts or 15 minutes. |
+| "⏳ Too many wrong codes from you" | You got it wrong 5 times within 10 minutes. Wait the indicated time, then try again with the **most recent** code in the pane. |
+| "You are paired, but the bridge could not start" | Your account was saved, but owner-only mode failed to start. Check the error in the pane and run the `restart` action. |
+| `Slack connection failed: invalid_auth` | Check that the `xoxb`/`xapp` tokens are correct, the app is installed to the workspace, and the App-Level Token has `connections:write`. |
+| `/herdr-...` gives "dispatch_failed" or another app answers | Check that the bridge is running. Also check whether another app uses a command with the same name (names must be unique across the workspace). |
+| "⛔ This Herdr bridge only accepts requests from its owner." | It is paired with a different account. Clear `SLACK_OWNER_USER_ID` in `.env`, `restart`, and pair again. |
+| Can't type in the DM window | Check the App Home messages tab setting (Manual setup, step 2.6). |
+| `another bridge is running (pid N)` | It's already running. Check with the `status` action and run the `restart` action if needed. |
+| Wizard stops with "needs a terminal" | It was run somewhere that can't take input (plugin log, pipe). Use the `setup` action or run it from a terminal. |
+| A plugin action seems to do nothing | Look at stdout/stderr in `herdr plugin log list --plugin herdr-slackbot`. |
+| Broken venv | Delete `.venv` in the plugin folder and run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1` again. |
+| `cannot verify the running bridge` | The running bridge couldn't be verified, so it wasn't stopped. Stop it yourself with Ctrl+C in the bridge pane of the `herdr-slack` workspace. |
 
-## 보안
+## Security
 
-- **본인 전용:** 슬래시 명령, 버튼, 모달, DM 메시지 모두 `SLACK_OWNER_USER_ID` 한 명만 처리합니다. 다른 사용자가 명령을 쓰면 본인에게만 보이는 거절 메시지가 갑니다.
-- **페어링:** 값이 비어 있으면 `/herdr pair <code>`만 받습니다. 코드는 PC 화면(브리지 pane, Herdr 알림)에만 표시되고 로그에는 남지 않습니다. 6자리 난수이고, 비교는 상수 시간으로 합니다. 모두 5번 틀리거나 15분이 지나면 바뀌고, 한 사람이 10분에 5번 넘게 시도할 수는 없습니다. 페어링하기 전에는 슬래시 명령 이름을 아는 같은 워크스페이스 사람도 `pair`를 시도할 수 있으니, 설치 직후 바로 페어링하세요.
-- **코드 출력이 Slack으로 나갑니다.** 에이전트의 답변, 화면 끝부분, 작업 폴더 경로, 터미널 제목이 Slack DM에 올라갑니다. 민감한 저장소에서는 🔕 음소거를 쓰거나 브리지를 끄세요(`stop` 액션).
-- Slack에서 새 에이전트를 띄울 때 고를 수 있는 권한 모드는 `manual`/`acceptEdits`/`auto`/`plan`뿐입니다. `bypassPermissions`는 없습니다.
-- 토큰은 플러그인 설정 폴더의 `.env`에만 둡니다. 이 파일은 git 저장소 밖에 있고, 저장소의 `.gitignore`에도 `.env`가 들어 있습니다. 로그에 찍히는 `xoxb-`/`xapp-` 토큰은 가려집니다.
-- Socket Mode는 PC에서 Slack으로 나가는 연결만 씁니다. 외부에서 들어오는 포트나 공개 URL이 없습니다.
+- **Owner only:** Slash commands, buttons, modals and DM messages are handled for the single user in `SLACK_OWNER_USER_ID`. Other users who try a command get a rejection only they can see.
+- **Pairing:** While the value is empty, only `/herdr pair <code>` is accepted. The code is shown only on the PC (bridge pane, Herdr notification) and never written to logs. It is a 6-digit random number compared in constant time. It is replaced after 5 wrong attempts in total or 15 minutes, and no single user can try more than 5 times in 10 minutes. Before pairing, anyone in the same workspace who knows the slash command name can attempt `pair`, so pair right after installing.
+- **Code output goes to Slack.** Agent answers, the end of the screen, working folder paths and terminal titles are posted to your Slack DM. For sensitive repositories, use 🔕 mute or turn the bridge off (`stop` action).
+- When starting a new agent from Slack, the only permission modes available are `manual`/`acceptEdits`/`auto`/`plan`. `bypassPermissions` is not offered.
+- Tokens live only in `.env` in the plugin config folder. That file is outside the git repository, and the repo's `.gitignore` also lists `.env`. `xoxb-`/`xapp-` tokens are masked in logs.
+- Socket Mode only uses outbound connections from your PC to Slack. There are no inbound ports or public URLs.
 
-## 개발
+## Development
 
 ```powershell
 .venv\Scripts\python -m pip install pytest
-.venv\Scripts\python -m pytest -q                       # 오프라인 테스트
-$env:HERDR_LIVE_TESTS=1; .venv\Scripts\python -m pytest tests/test_live.py   # 실행 중인 Herdr 대상 (읽기 전용)
+.venv\Scripts\python -m pytest -q                       # offline tests
+$env:HERDR_LIVE_TESTS=1; .venv\Scripts\python -m pytest tests/test_live.py   # against a running Herdr (read-only)
 ```
 
-설계와 결정 사항은 `docs/SPEC.md`에, 마일스톤별 진행 기록은 `docs/progress/`에 있습니다.
+Design and decisions are in `docs/SPEC.md`, and per-milestone progress notes are in `docs/progress/`.

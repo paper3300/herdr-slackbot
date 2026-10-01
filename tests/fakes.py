@@ -41,6 +41,11 @@ class FakeHerdr:
         self.slow: dict[str, float] = {}  # method -> seconds to sleep
         self.log: list | None = None  # shared call log (set by tests)
         self.visible_error: Exception | None = None
+        # Called after send_keys / send_text with (pane_id, keys | text): tests script the screen
+        # and status changes a key press causes.
+        self.on_keys = None
+        self.on_text = None
+        self.input_error: Exception | None = None
 
     # --- setup helpers ---
     def add_agent(self, pane_id, status="idle", name=None, session=None, kind="claude", cwd="D:\\main",
@@ -130,8 +135,27 @@ class FakeHerdr:
             raise self.visible_error
         return self.visible.get(target, "")
 
+    def send_keys(self, target, keys):
+        self.calls.append(("send_keys", target, list(keys)))
+        if self.input_error:
+            raise self.input_error
+        if self.on_keys:
+            self.on_keys(target, list(keys))
+        return {"type": "ok"}
+
+    def send_text(self, pane_id, text):
+        self.calls.append(("send_text", pane_id, text))
+        if self.input_error:
+            raise self.input_error
+        if self.on_text:
+            self.on_text(pane_id, text)
+        return {"type": "ok"}
+
     def prompts(self):
         return [c for c in self.calls if c[0] == "prompt_agent"]
+
+    def inputs(self):
+        return [c for c in self.calls if c[0] in ("send_keys", "send_text")]
 
 
 class FakeTransport:

@@ -1,0 +1,50 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ✨ Update available! 0.159.0 -> 0.159.2                                                                                              │
+│ Run powershell -ExecutionPolicy Bypass -c '$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex' to update. │
+│                                                                                                                                      │
+│ See full release notes:                                                                                                              │
+│ https://github.com/openai/codex/releases/latest                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+  >_ OpenAI Codex (v0.159.0)
+     D:\work\demo\projects\sample-app\services\api-gateway\modules\billing\handlers\webhooks\integration-tests\fixt
+
+  Whoa, fancy meeting you here!
+
+
+› Create a file named e.txt containing codex2 using a shell command. You are in a read-only sandbox, so request escalated permission for the command.
+
+
+• I’ll create e.txt with the exact text codex2 using a shell command and request the required write permission.
+
+• Running Set-Content -LiteralPath 'e.txt' -Value 'codex2' -NoNewline
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Allow me to create e.txt containing codex2 in the workspace?
+
+  $ Set-Content -LiteralPath 'e.txt' -Value 'codex2' -NoNewline
+
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `Set-Content -LiteralPath e.txt -Value codex2 -NoNewline` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

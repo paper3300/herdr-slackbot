@@ -97,8 +97,28 @@ Slack이 응답을 잃어버렸을 때, 브리지는 메시지에 숨겨 둔 마
 
 - [ ] PC에서 직접 띄운 claude에 작업을 시킵니다. 그 탭을 보고 있지 않은 상태로 끝나면(done) 새 스레드와 `✅` 결과가 옵니다.
 - [ ] 같은 작업을 탭을 보면서 끝내면(idle) 알림이 오지 않습니다(정상).
-- [ ] 권한 확인이 필요한 작업을 시켜 blocked 상태로 만들면 `⚠️ … needs confirmation on PC`가 옵니다.
+- [ ] 권한 확인이 필요한 작업을 시켜 blocked 상태로 만들면 `⚠️ … is waiting for your answer` 메시지가 버튼과 함께 옵니다 (자세한 확인은 7-1).
 - [ ] 스레드 알림이 휴대폰이나 데스크톱에서 실제로 울리는지 적어 둡니다. 스레드 답장만으로 충분히 눈에 띄는지 판단하기 위한 기록입니다.
+
+## 7-1. 대화 상자에 답하기 (Slack 버튼)
+
+모두 권한 모드 `manual`(또는 default)인 claude로 확인합니다. 누른 뒤 화면이 바뀔 때까지 1~2초 걸릴 수 있습니다.
+
+- [ ] **권한 확인:** "Bash로 `echo hi > a.txt` 실행해"를 보냅니다. `Bash command` 메시지에 `1. Yes` / `2. Yes, and always allow …` / `3. No` / Esc / Show screen 버튼이 있습니다. **1. Yes**를 누르면 PC에서 명령이 실행되고 메시지가 `✅ 1. Yes — answered from Slack`으로 바뀝니다(버튼 없음).
+- [ ] **PC에서 답하기:** 같은 요청을 다시 보내고 이번에는 PC에서 답합니다. Slack 메시지가 `✅ answered on PC`로 바뀝니다. 그 뒤 옛 버튼을 누르면 키가 가지 않고 "no longer open" 안내가 나옵니다.
+- [ ] **바뀐 질문:** 버튼이 떠 있는 동안 PC에서 Esc로 취소하고 다른 권한 요청을 띄운 뒤 옛 버튼을 누르면 키가 가지 않고 메시지가 새 질문으로 바뀝니다("changed on PC").
+- [ ] **질문 두 개(단일 + 복수 선택):** "AskUserQuestion으로 Color(Red/Blue/Green)와 Fruits(multiSelect, Apple/Banana/Cherry)를 한 번에 물어봐". Blue를 누르면 **같은 메시지**가 Fruits 질문으로 바뀝니다. Apple을 누르면 ☑ Apple이 되고, **Next →**(Submit 줄로 커서 이동 + Enter)를 누르면 Review 화면, **1. Submit answers**를 누르면 `answered from Slack`이 되고 claude가 답을 받습니다.
+- [ ] **직접 입력(모달):** "AskUserQuestion으로 이름(Alpha/Beta)을 물어봐" → **Type something.** 버튼 → 모달에 한글로 입력 → 전송. claude가 입력한 글자 그대로 받습니다.
+- [ ] **여러 줄 입력:** Type something 모달에 두 줄을 입력합니다. claude가 줄바꿈 그대로 받습니다(중간에 제출되지 않음).
+- [ ] **복수 선택의 직접 입력:** Fruits 같은 multiSelect 질문에서 **Type something** 버튼 → 텍스트 입력. 그 칸이 체크되고 글자가 들어갑니다(Enter는 누르지 않음). 두 줄로 입력해도 줄바꿈만 들어가고 체크가 풀리지 않습니다. 메시지의 그 칸에 입력한 글자가 `↵`로 이어져 보입니다. 이어서 **Next →**로 제출하면 claude가 여러 줄 그대로 받습니다.
+- [ ] **재시작 중 PC에서 답하기:** 질문 두 개짜리 AskUserQuestion이 Slack에 온 뒤 브리지를 멈추고, PC에서 첫 질문만 답한 다음 브리지를 다시 시작합니다. 같은 메시지가 둘째 질문으로 바뀌고("changed on PC") 버튼이 남아 있습니다.
+- [ ] **직접 입력(스레드 답장):** 같은 질문을 다시 띄우고 스레드에 답장합니다. 답장이 그 질문의 답이 됩니다. 권한 확인처럼 직접 입력이 없는 질문에 답장하면 "This question needs one of the buttons above."가 나오고 키는 가지 않습니다.
+- [ ] **계획 승인:** 권한 모드 `plan`으로 에이전트를 띄워 작은 작업을 시킵니다. 계획 본문이 메시지에 나오고(길면 [전체 보기]), **3. Tell Claude what to change** → 모달 입력 → claude가 계획을 고칩니다. claude가 working으로 바뀌므로 옛 메시지는 `answered from Slack`으로 닫히고, 새 계획은 **새 메시지**로 옵니다.
+- [ ] **시작할 때 폴더 신뢰(claude):** 한 번도 신뢰하지 않은 새 폴더를 cwd로 `/herdr new`를 실행합니다. 스레드가 생기고 `Accessing workspace` 질문이 버튼(No, exit / Yes, I trust this folder)으로 옵니다. **Yes**를 누르면 원래 프롬프트가 전송되고 `📨` 표시가 스레드에 나옵니다.
+- [ ] **시작할 때 폴더 신뢰(codex):** 새 폴더로 codex를 띄웁니다. `Folder access` 질문이 오고 **1. Trust and continue**를 누르면 프롬프트가 전송됩니다.
+- [ ] **Codex 명령 승인:** `approvals_reviewer`가 `auto_review`가 아닌 codex에 쓰기 명령을 시킵니다. `Would you like to run the following command?` 메시지의 **1. Yes, proceed**로 실행됩니다.
+- [ ] **Show screen:** 아무 대화 상자에서 **Show screen**을 누르면 화면 끝 40줄이 코드 블록으로 스레드에 올라옵니다.
+- [ ] **두 번 누르기:** 버튼을 빠르게 두 번 눌러도 PC에는 키가 한 번만 갑니다(두 번째는 "no longer open" 또는 새 질문으로 갱신).
 
 ## 8. 음소거
 

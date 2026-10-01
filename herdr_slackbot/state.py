@@ -11,7 +11,11 @@ state.json layout (version 1):
       "muted": false,
       "agent_name": "slack-7", "pane_id": "w1:p3", "workspace_id": "w1",
       "created_at": 1727650000.0,
-      "pending_task": {"started_at": ..., "working_announced": false} | null
+      "pending_task": {"started_at": ..., "working_announced": false} | null,
+      "dialog": {"token", "fingerprint", "kind", "options", "message_ts", ...} | null,
+                                     # the open blocked-dialog message (answered from Slack)
+      "deferred_prompt": {"text": ...} | null  # a new agent's first prompt, sent once its
+                                     # startup dialog (folder trust) is answered
     }
   }
 }
@@ -281,6 +285,16 @@ class StateStore:
         with self._lock:
             for key, entry in self._data["threads"].items():
                 if (entry.get("pending_task") or {}).get("task_id") == task_id:
+                    return key
+        return None
+
+    def find_dialog(self, token: str | None) -> str | None:
+        """Key of the thread whose open dialog record has `token` (follows re-keying)."""
+        if not token:
+            return None
+        with self._lock:
+            for key, entry in self._data["threads"].items():
+                if (entry.get("dialog") or {}).get("token") == token:
                     return key
         return None
 

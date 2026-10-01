@@ -205,7 +205,7 @@ def test_new_command_errors(env):
 
 # --- send / D6 --------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("status,needle", [("working", "busy"), ("blocked", "needs confirmation on PC"),
+@pytest.mark.parametrize("status,needle", [("working", "busy"), ("blocked", "use the buttons in its thread"),
                                            ("unknown", "state is unknown")])
 def test_send_rejections(env, status, needle):
     env.herdr.add_agent("w1:p1", status, name="coder")
@@ -244,7 +244,7 @@ def test_send_agent_blocked_error_clears_pending(env):
     env.herdr.prompt_script = [HerdrError("agent_blocked", "blocked")]
     run(env, "send coder hi")
     assert env.state.get_thread("S1")["pending_task"] is None
-    assert "needs confirmation on PC" in env.transport.posts[-1]["text"]
+    assert "use the buttons in its thread" in env.transport.posts[-1]["text"]
 
 
 # --- #2 atomic admission ---------------------------------------------------------------------------
@@ -710,7 +710,7 @@ def test_blocked_notification_once_per_seq(env):
     t = transition(env, "w1:p1", "working", "blocked")
     env.bridge.handle_transition(t)
     env.bridge.handle_transition(t)
-    assert sum(1 for p in env.transport.posts if "needs confirmation" in p["text"]) == 1
+    assert sum(1 for p in env.transport.posts if "is waiting for your answer" in p["text"]) == 1
 
 
 def test_ended_before_completion_notice(env):

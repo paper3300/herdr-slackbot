@@ -33,6 +33,7 @@ Threading model
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import queue
@@ -66,6 +67,8 @@ from .commands import (
     workspace_cwd,
 )
 from .config import Config
+from .dialog import (KIND_PLAN, KIND_TRUST, Dialog, keys_for, parse_dialog, screen_fingerprint, submit_keys,
+                     tail_lines, text_keys, typed_text)
 from .events import AgentTransition, SubscriptionManager, session_of
 from .herdr_client import HerdrError, HerdrOutcomeUnknown
 from .naming import (
@@ -107,6 +110,26 @@ WORKER_POST_ATTEMPTS = 4
 INTENT_LOOKBACK = 120.0  # seconds before an uncertain post's first attempt to search history from
 MIN_ABSENT_AGE = 5.0  # a "not found" younger than this may be Slack's indexing lag: defer, don't re-post
 INTENT_MAX_AGE = 7 * 86400.0  # leftover intents older than this are pruned on the next commit
+DIALOG_POLL_INTERVAL = 0.3  # after answering: how often the screen / status is checked
+DIALOG_POLL_TIMEOUT = 5.0  # ... and for how long before "could not confirm"
+DIALOG_KEY_GAP = 0.3  # between the digit that opens a text input, the text and Enter
+DIALOG_READ_LINES = 80
+DIALOG_READ_RETRIES = 2  # extra reads of a screen that did not parse before posting a keypad
+IDLE_DIALOG_RECHECK = 15.0  # idle dialogs (Codex trust) are rechecked at most this often
+CLOSED_DIALOGS_KEPT = 20  # closed dialog message ts per thread (late clicks leave them alone)
+DIALOG_SCREEN_LINES = 40  # [Show screen]
+PLAN_FILE_MAX = 200_000
+KEYPAD = "keypad"  # pending-dialog kind when the screen could not be parsed
+DIALOG_KEYS = frozenset({"1", "2", "3", "4", "up", "down", "enter", "esc", "right", "submit"})
+KEY_LABELS = {"up": "↑", "down": "↓", "enter": "Enter", "esc": "Esc", "right": "Next →", "submit": "Next →"}
+DIALOG_GONE_TEXT = "This question is no longer open."
+DIALOG_BUTTONS_TEXT = "This question needs one of the buttons above."
+DIALOG_CHANGED_TEXT = "The question changed on PC; nothing was sent. Answer the updated one above."
+DIALOG_STALE_TEXT = "That button was out of date; nothing was sent. Use the updated buttons above."
+UNCONFIRMED_TEXT = "⚠️ Could not confirm the answer; check the screen."
+ANSWERED_ON_PC = "✅ answered on PC"
+ALREADY_ANSWERED = "✅ Already answered or changed on PC"
+AGENT_ENDED = "⏹ ended"
 
 
 @dataclass
@@ -161,6 +184,12 @@ class NewAgentRequest:
 
 
 @dataclass(frozen=True)
+class _Reconcile:
+    """Notifier item: reconcile a thread's open dialog / deferred prompt without a transition."""
+    key: str
+
+
+@dataclass(frozen=True)
 class _Resume:
     key: str
     task_id: str | None = None  # follows the task if its entry is re-keyed (provisional -> session)
@@ -189,7 +218,7 @@ def _seq(info: Mapping | None) -> int:
 
 REASON_TEXT = {
     REASON_BUSY: "⏳ *{name}* is busy (working). Try again when it has finished.",
-    REASON_BLOCKED: "⚠️ *{name}* needs confirmation on PC.",
+    REASON_BLOCKED: "⚠️ *{name}* is waiting for an answer: use the buttons in its thread, or answer on PC.",
     "unknown": "❔ *{name}*'s state is unknown, so nothing was sent.",
     REASON_GONE: "🪦 The agent has exited, so nothing was sent.",
     REASON_SESSION_CHANGED: "🔄 The agent is gone; its pane now hosts a different agent. Nothing was sent.",
@@ -322,7 +351,7 @@ class Bridge:
                  clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
                  executor=None, manager: SubscriptionManager | None = None,
                  claude_projects: Path | None = None, codex_home_dir: Path | None = None,
-                 ack_budget: float = ACK_BUDGET):
+                 ack_budget: float = ACK_BUDGET, home_dir: Path | None = None):
         self.cfg = cfg
         self.client = client
         self.state = state
@@ -336,6 +365,7 @@ class Bridge:
         self.claude_projects = claude_projects
         self.codex_home_dir = codex_home_dir or codex_home()
         self.ack_budget = ack_budget
+        self.home_dir = home_dir  # `~` of plan file paths shown by plan approval dialogs
         self.dm_channel: str | None = None
         self.started_at = clock()
         self._notify_q: queue.Queue = queue.Queue()
@@ -347,6 +377,10 @@ class Bridge:
         self._intents: dict[str, dict] = {}  # op -> {"since", "ts"} (in-process view of post intents)
         self._locks: dict[str, threading.RLock] = defaultdict(threading.RLock)
         self._locks_guard = threading.Lock()
+        # Per agent (terminal id): answering a dialog (keys + confirmation polling), its transitions,
+        # restart reconciles and startup dialogs are serialized. Order: this lock, then the admission
+        # lock, then the per-key lock (see "Blocked dialogs" below).
+        self._answer_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
         self.stats = {"notifications": 0, "prompts": 0, "agents_started": 0, "slack_retries": 0}
         self._home_user: str | None = None  # set once the owner has opened the Home tab
         self._activated = False  # start() / activate_owner() completed
@@ -363,9 +397,14 @@ class Bridge:
         self.manager.start()
         self._activated = True
         # Restart recovery runs on the notifier thread, serialized with live transitions.
+        self._queue_recovery()
+
+    def _queue_recovery(self) -> None:
         for key, entry in self.state.all_threads().items():
             if entry.get("pending_task"):
                 self._notify_q.put(_Resume(key, entry["pending_task"].get("task_id")))
+            if entry.get("dialog") or entry.get("deferred_prompt"):
+                self._notify_q.put(_Reconcile(key))  # answered / changed while the bridge was down
 
     def activate_owner(self, user: str) -> None:
         """Pairing succeeded (pairing.py): serve `user` from now on without a restart. Starts
@@ -387,9 +426,7 @@ class Bridge:
                 self.manager.stop()  # leave no half-open subscriptions behind for the retry
                 raise
             self._activated = True
-            for key, entry in self.state.all_threads().items():
-                if entry.get("pending_task"):
-                    self._notify_q.put(_Resume(key, entry["pending_task"].get("task_id")))
+            self._queue_recovery()
         cmd = self.cfg.slash_command
         self._post_safe(f"👋 Paired! This Herdr bridge now serves only you.\n"
                         f"Agents' done/blocked notifications arrive here, one thread per agent; reply in a "
@@ -421,6 +458,10 @@ class Bridge:
     def _lock(self, key: str) -> threading.RLock:
         with self._locks_guard:
             return self._locks[key]
+
+    def _answer_lock(self, key: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._answer_locks[key]
 
     # --- small helpers -------------------------------------------------------------
     def _submit(self, fn, *args) -> None:
@@ -844,6 +885,7 @@ class Bridge:
     def run_new_agent(self, req: NewAgentRequest, reply: Callable[[str], None] | None = None) -> None:
         """Worker: tab create -> agent start -> thread root -> prompt."""
         name = req.name or "agent"
+        pane_id = None
         try:
             live = {a.get("name") for a in self.client.list_agents()}
             if req.name:
@@ -872,8 +914,7 @@ class Bridge:
             return
         except HerdrError as exc:
             if exc.code == "agent_not_ready":
-                self._reply_safe(reply, f"⚠️ *{B.escape(name)}* is waiting for confirmation on PC during "
-                                        "startup. Confirm it there, then use send.")
+                self._startup_dialog(req, name, pane_id, reply)
             else:
                 self._reply_safe(reply, f"❌ Could not start the agent: {B.escape(str(exc))}")
             return
@@ -895,19 +936,91 @@ class Bridge:
         info.setdefault("workspace_id", req.workspace_id)
         info.setdefault("agent", req.kind)
         info.setdefault("name", name)
+        if req.kind == KIND_CODEX:
+            if self.cfg.codex_prompt_delay > 0:
+                self.sleep(self.cfg.codex_prompt_delay)  # Codex drops input pasted while it initializes
+            # Codex reports `idle` while its folder-trust screen is up: treat that as blocked. Checked
+            # after the delay (the screen may be drawn during it), on a few reads.
+            if self._codex_trust_shown(info["pane_id"]):
+                self._startup_dialog(req, name, info["pane_id"], reply, info=info, idle=True)
+                return
         self.stats["agents_started"] += 1
         ws_label = self._ws_labels().get(req.workspace_id, req.workspace_id)
+        # Admit by the identity pinned at start: never by whatever the pane showed last.
+        target = Target(info["pane_id"], expected.get("session"), expected.get("terminal_id"), info.get("name"))
+        self.send(target, req.prompt, reply, fresh=True, root=self._new_root(req, info, ws_label))
+
+    def _codex_trust_shown(self, pane_id: str) -> bool:
+        for attempt in range(DIALOG_READ_RETRIES + 1):
+            if attempt:
+                self.sleep(DIALOG_POLL_INTERVAL)
+            dialog = parse_dialog(self._visible(pane_id) or "", KIND_CODEX)
+            if dialog is not None and dialog.kind == KIND_TRUST:
+                return True
+        return False
+
+    def _new_root(self, req: NewAgentRequest, info: Mapping, ws_label: str) -> tuple[str, list[str]]:
+        """Thread root (title, lines) of an agent started from Slack."""
         opts = " · ".join(a for a in (req.model, req.effort, req.mode if req.kind != KIND_CODEX else None) if a)
         lines = [f"`{req.kind}`" + (f" · {B.escape(opts)}" if opts else "")]
         if info.get("cwd") or req.cwd:
             lines.append(f"📁 `{B.escape(info.get('cwd') or req.cwd)}`")
         lines.append("📨 " + B.escape(truncate(_norm(req.prompt), PROMPT_EXCERPT)))
-        if req.kind == KIND_CODEX and self.cfg.codex_prompt_delay > 0:
-            self.sleep(self.cfg.codex_prompt_delay)  # Codex drops input pasted while it initializes
-        # Admit by the identity pinned at start: never by whatever the pane showed last.
-        target = Target(info["pane_id"], expected.get("session"), expected.get("terminal_id"), info.get("name"))
-        self.send(target, req.prompt, reply, fresh=True,
-                  root=(self._agent_title(info, ws_label, "🚀"), lines))
+        return self._agent_title(info, ws_label, "🚀"), lines
+
+    def _startup_dialog(self, req: NewAgentRequest, name: str, pane_id: str | None, reply,
+                        info: dict | None = None, idle: bool = False) -> None:
+        """A new agent waits for an answer while starting (folder trust): open its thread with the
+        dialog and keep the prompt; it is sent once the dialog is answered and the agent is idle.
+        `idle`: the agent reports idle although the dialog is up (Codex)."""
+        if info is None and pane_id:
+            try:
+                info = self.client.find_agent(pane_id)
+            except HerdrError as exc:
+                log.warning("finding the starting agent in %s failed: %s", pane_id, exc)
+        if info is not None and info.get("agent_status") != "blocked" and not idle:
+            # Not reported blocked (yet): only a folder-trust screen counts as a startup dialog.
+            dialog = parse_dialog(self._visible(info.get("pane_id") or pane_id) or "", req.kind)
+            idle = dialog is not None and dialog.kind == KIND_TRUST
+            if not idle:
+                info = None
+        if info is None:
+            self._reply_safe(reply, f"⚠️ *{B.escape(name)}* is waiting for confirmation on PC during "
+                                    "startup. Confirm it there, then use send.")
+            return
+        info = dict(info)
+        info.setdefault("pane_id", pane_id)
+        info.setdefault("workspace_id", req.workspace_id)
+        info.setdefault("agent", req.kind)
+        info.setdefault("name", name)
+        ws_label = self._ws_labels().get(req.workspace_id, req.workspace_id)
+        title, lines = self._new_root(req, info, ws_label)
+        seq = _seq(info)
+        answer_id = self._answer_id(info.get("terminal_id"), info.get("pane_id"))
+        try:
+            with self._answer_lock(answer_id), self._admission_lock:
+                key, provisional = self._key_for(info)
+                with self._lock(key):
+                    entry = self._retrying(lambda: self._ensure_thread(key, info, title, lines, ORIGIN_SLACK,
+                                                                       provisional=provisional))
+                    fields = {"deferred_prompt": {"text": req.prompt, "at": self.clock()}}
+                    if seq:
+                        fields["last_blocked_seq"] = seq
+                    if entry.get("dialog"):
+                        # The notifier posted this agent's dialog already: keep it, add the prompt.
+                        self._commit(key, None, **fields)
+                    else:
+                        op = f"blocked:{info.get('terminal_id') or key}:startup"
+                        self._retrying(lambda: self._open_dialog(key, entry, info, ws_label, op, idle=idle,
+                                                                 **fields))
+        except Exception:
+            log.exception("posting the startup dialog failed")
+            self._reply_safe(reply, f"❌ *{B.escape(name)}* is waiting for an answer during startup, but posting "
+                                    "it to Slack failed. Answer it on PC, then use send.")
+            return
+        self.stats["agents_started"] += 1
+        self._reply_safe(reply, f"⚠️ *{B.escape(name)}* is waiting for an answer during startup: answer it in "
+                                "its thread. The prompt is sent once it is answered.")
 
     @staticmethod
     def _same_agent(live: Mapping, expected: dict) -> bool:
@@ -1191,6 +1304,10 @@ class Bridge:
         provisional = bool(entry.get("provisional"))
         target = Target(entry.get("pane_id") or "", None if provisional else key, entry.get("terminal_id"),
                         entry.get("agent_name"), key)
+        if entry.get("dialog"):
+            # D6 revised: while the agent's dialog is open, a reply is its free-text answer.
+            self._submit(self.answer_thread_reply, key, target, text, thread_ts)
+            return
         self._submit(self.send, target, text, None, False, None, thread_ts)
 
     # --- admission + delivery -----------------------------------------------------------
@@ -1399,6 +1516,563 @@ class Bridge:
                                         f"{meta.get('name') or 'Result'} (full)")
 
     # =====================================================================================
+    # Blocked dialogs, answered from Slack
+    #
+    # A blocked agent's dialog is posted with one button per option. Its pending record lives
+    # in the thread entry (`dialog`): {token, fingerprint, kind, options, message_ts, ...}; the
+    # buttons carry only the token. The message and its record are built once per post op and
+    # persisted (`dialog_pending`) before the first attempt, so a retried post can never pair
+    # the buttons with another screen's record. Before any key is sent the live agent and screen
+    # must still match the record (same session, still blocked, same fingerprint).
+    #
+    # Locks: answering (keys + confirmation polling), transition handling and startup dialogs of
+    # one agent are serialized by its answer lock, keyed by the terminal id (stable across the
+    # provisional -> session re-key). Order: answer lock, then the admission lock, then the
+    # per-key lock. The answer worker never takes the admission lock while it holds its lock.
+    # =====================================================================================
+    @staticmethod
+    def _answer_id(terminal_id: str | None, fallback: str | None) -> str:
+        return terminal_id or fallback or ""
+
+    def _transition_answer_id(self, t: AgentTransition) -> str:
+        terminal = (t.info or {}).get("terminal_id")
+        if not terminal and t.session:
+            terminal = (self.state.get_thread(t.session) or {}).get("terminal_id")
+        if not terminal and t.pane_id:  # e.g. an ended transition of a still provisional thread
+            prov = self.state.find_provisional(t.pane_id)
+            terminal = (self.state.get_thread(prov) or {}).get("terminal_id") if prov else None
+        return self._answer_id(terminal, t.session or t.pane_id)
+
+    def _key_now(self, key: str, terminal_id: str | None) -> str:
+        """`key`, or the key its entry moved to (provisional -> session) if it was re-keyed."""
+        if self.state.get_thread(key) is not None or not terminal_id:
+            return key
+        for other, entry in self.state.all_threads().items():
+            if entry.get("terminal_id") == terminal_id:
+                return other
+        return key
+
+    def _visible(self, pane_id: str | None) -> str | None:
+        """The pane's visible screen, or None when it could not be read."""
+        if not pane_id:
+            return None
+        try:
+            return self.client.read_agent_once(pane_id, DIALOG_READ_LINES, source="visible")
+        except HerdrError as exc:
+            log.warning("reading the screen of %s failed: %s", pane_id, exc)
+            return None
+
+    def _read_dialog(self, pane_id: str | None, agent_kind: str | None) -> tuple[str | None, Dialog | None]:
+        """Screen + parsed dialog. An unparsed screen is read again (it may not be drawn yet)."""
+        screen = self._visible(pane_id)
+        dialog = parse_dialog(screen or "", agent_kind)
+        for _ in range(DIALOG_READ_RETRIES):
+            if dialog is not None or screen is None:
+                break
+            self.sleep(DIALOG_POLL_INTERVAL)
+            screen = self._visible(pane_id)
+            dialog = parse_dialog(screen or "", agent_kind)
+        return screen, dialog
+
+    def _plan_text(self, dialog: Dialog | None) -> str | None:
+        """The full plan from the plan file named in a plan approval dialog, if readable."""
+        if dialog is None or not dialog.plan_file:
+            return None
+        raw = dialog.plan_file
+        if raw.startswith("~"):
+            path = (self.home_dir or Path.home()) / raw[1:].replace("\\", "/").lstrip("/")
+        else:
+            path = Path(raw)
+        if path.suffix.lower() != ".md" or path.parent.name != "plans" or path.parent.parent.name != ".claude":
+            return None
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                return f.read(PLAN_FILE_MAX)
+        except OSError as exc:
+            log.info("plan file %s is not readable: %s", path, exc)
+            return None
+
+    @staticmethod
+    def _dialog_fields(dialog: Dialog | None, screen: str | None) -> dict:
+        """The record fields that describe what the message shows."""
+        if dialog is None:
+            return {"fingerprint": screen_fingerprint(screen or ""), "kind": KEYPAD, "options": [],
+                    "question": "", "summary": B.dialog_summary(None), "plan_hash": None}
+        return {"fingerprint": dialog.fingerprint, "kind": dialog.kind,
+                "options": [{"n": o.number, "label": o.label, "free_text": o.free_text, "chat": o.chat,
+                             "checked": o.checked, "typed": typed_text(o)} for o in dialog.options],
+                "question": truncate(dialog.question, 500), "summary": B.dialog_summary(dialog), "plan_hash": None}
+
+    def _render(self, name: str, ws_label: str, dialog: Dialog | None, screen: str | None, token: str,
+                note: str | None = None, session: str | None = None) -> tuple[str, list, dict]:
+        """(fallback text, blocks, record fields) of a dialog message."""
+        fields = self._dialog_fields(dialog, screen)
+        plan_text = full_id = None
+        if dialog is not None and dialog.kind == KIND_PLAN:
+            plan_text = self._plan_text(dialog)
+            if plan_text is not None:
+                fields["plan_hash"] = _text_hash(plan_text)  # a re-plan in the same file is a change
+            full = plan_text if plan_text is not None else "\n".join(dialog.body)
+            if len(B.to_mrkdwn(full)) > B.PLAN_MAX_CHARS:
+                full_id = self.results.save(full, {"name": name, "session": session, "at": self.clock()})
+        blocks = B.dialog_blocks(name, ws_label, dialog, token, plan_text=plan_text, full_id=full_id,
+                                 screen_tail=tail_lines(screen or "", B.KEYPAD_TAIL_LINES), note=note)
+        return _strip_mrkdwn(B.dialog_header(name, ws_label)), blocks, fields
+
+    def _open_dialog(self, key: str, entry: Mapping, info: Mapping, ws_label: str, op: str,
+                     idle: bool = False, **fields) -> None:
+        """Post the dialog of a blocked agent in its thread and store the pending record (the caller
+        holds the thread lock). `fields` are committed together with the record."""
+        pending = (self.state.get_thread(key) or {}).get("dialog_pending")
+        if not pending or pending.get("op") != op:
+            pane = info.get("pane_id") or entry.get("pane_id")
+            agent_kind = info.get("agent") or entry.get("kind")
+            screen, dialog = self._read_dialog(pane, agent_kind)
+            token = uuid.uuid4().hex[:16]
+            name = _display(info, entry)
+            text, blocks, shown = self._render(name, ws_label, dialog, screen, token, session=session_of(info) or key)
+            record = {"token": token, **shown, "thread_ts": entry.get("thread_ts"), "channel": self.dm_channel,
+                      "agent_session": session_of(info), "terminal_id": info.get("terminal_id"), "pane_id": pane,
+                      "agent_kind": agent_kind, "name": name, "ws": ws_label, "idle": idle}
+            # Durable before the first attempt: every retry posts (or reuses) exactly this message
+            # and commits exactly this record.
+            pending = {"op": op, "text": text, "blocks": blocks, "record": record}
+            self.state.upsert_thread(key, dialog_pending=pending)
+        ts = self._post(pending["text"], pending["blocks"], entry.get("thread_ts"), op=op, key=key)
+        record = dict(pending["record"], message_ts=ts, created_at=self.clock())
+        self._commit(key, op, dialog=record, dialog_pending=None, **fields)
+
+    def _dialog_agent(self, rec: Mapping) -> dict | None:
+        """The live agent a dialog record belongs to (identity-checked). Raises HerdrError."""
+        if rec.get("agent_session"):
+            return self._find_session_agent(rec["agent_session"], rec.get("pane_id"))
+        info = self.client.find_agent(rec["pane_id"]) if rec.get("pane_id") else None
+        if info is not None and rec.get("terminal_id") and info.get("terminal_id") != rec["terminal_id"]:
+            return None
+        return info
+
+    def _dialog_state(self, rec: Mapping) -> tuple[str, dict | None, Dialog | None, str | None]:
+        """(state, live info, parsed dialog, screen). state: `open` (the message still shows the live
+        dialog), `changed` (a different dialog / screen), `answered` (no longer waiting), `gone`, or
+        `unreadable`. Raises HerdrError when Herdr could not be asked."""
+        info = self._dialog_agent(rec)
+        if info is None:
+            return "gone", None, None, None
+        if info.get("agent_status") != "blocked" and not rec.get("idle"):
+            return "answered", info, None, None
+        screen = self._visible(info.get("pane_id"))
+        if screen is None:
+            return "unreadable", info, None, None
+        dialog = parse_dialog(screen, rec.get("agent_kind") or info.get("agent"), _typed_row_hint(rec))
+        if rec.get("idle") and (dialog is None or dialog.kind != KIND_TRUST):
+            return "answered", info, dialog, screen  # the startup screen reported as idle is gone
+        if rec.get("kind") == KEYPAD:
+            same = screen_fingerprint(screen) == rec.get("fingerprint")
+        else:
+            same = dialog is not None and dialog.fingerprint == rec.get("fingerprint")
+            if same and rec.get("plan_hash"):
+                plan = self._plan_text(dialog)
+                same = plan is not None and _text_hash(plan) == rec["plan_hash"]
+        return ("open" if same else "changed"), info, dialog, screen
+
+    def _close_dialog(self, key: str, rec: Mapping, outcome: str) -> None:
+        """Replace the dialog message's buttons by `outcome` and drop the record (best effort). The
+        message is remembered as closed, so a late click on it leaves the outcome alone."""
+        key = self.state.find_dialog(rec.get("token")) or key
+        blocks = B.dialog_closed_blocks(rec.get("name") or "agent", rec.get("ws") or "", rec.get("summary") or "",
+                                        outcome)
+        try:
+            self._retrying(lambda: self.transport.update_message(rec.get("channel") or self.dm_channel,
+                                                                 rec["message_ts"], _strip_mrkdwn(outcome), blocks))
+        except Exception:
+            log.warning("removing the buttons of a dialog message failed", exc_info=True)
+        with self._lock(key):
+            entry = self.state.get_thread(key) or {}
+            if (entry.get("dialog") or {}).get("token") == rec.get("token"):
+                closed = [ts for ts in entry.get("closed_dialogs") or [] if ts != rec.get("message_ts")]
+                closed = (closed + [rec.get("message_ts")])[-CLOSED_DIALOGS_KEPT:]
+                self.state.upsert_thread(key, dialog=None, closed_dialogs=closed)
+
+    def _rerender_dialog(self, key: str, rec: Mapping, dialog: Dialog | None, screen: str | None,
+                         note: str | None = None) -> dict:
+        """Edit the dialog message to show the current dialog, under a new token."""
+        key = self.state.find_dialog(rec.get("token")) or key
+        token = uuid.uuid4().hex[:16]
+        text, blocks, shown = self._render(rec.get("name") or "agent", rec.get("ws") or "", dialog, screen, token,
+                                           note, rec.get("agent_session") or key)
+        try:
+            self._retrying(lambda: self.transport.update_message(rec.get("channel") or self.dm_channel,
+                                                                 rec["message_ts"], text, blocks))
+        except Exception:
+            log.warning("updating a dialog message failed; its old buttons now report it out of date", exc_info=True)
+        new = dict(rec, token=token, **shown)
+        with self._lock(key):
+            current = (self.state.get_thread(key) or {}).get("dialog") or {}
+            if current.get("token") == rec.get("token"):
+                self.state.upsert_thread(key, dialog=new)
+        return new
+
+    def _reconcile_dialog(self, key: str, rec: Mapping, transition: bool = True) -> None:
+        """Bring the dialog message in line with the live agent. No longer waiting -> closed. A different
+        dialog: after a transition the message is closed (the `blocked` transition that follows posts
+        the new one); without a transition (restart, idle recheck) nothing else would post it, so the
+        message is re-rendered with the new dialog under a new token instead."""
+        try:
+            state, _, dialog, screen = self._dialog_state(rec)
+        except HerdrError as exc:
+            log.warning("checking the open dialog of %s failed: %s", key, exc)
+            return
+        if state == "gone":
+            self._close_dialog(key, rec, AGENT_ENDED)
+        elif state == "answered":
+            self._close_dialog(key, rec, ANSWERED_ON_PC)
+        elif state == "changed" and not (rec.get("kind") == KEYPAD and dialog is None):
+            if transition:
+                self._close_dialog(key, rec, ANSWERED_ON_PC)
+            else:
+                self._rerender_dialog(key, rec, dialog, screen, note=DIALOG_CHANGED_TEXT)
+
+    def handle_reconcile(self, key: str) -> None:
+        """Restart / idle recheck (notifier thread): reconcile an open dialog without a transition,
+        then send a deferred first prompt whose dialog is gone."""
+        entry = self.state.get_thread(key)
+        if not entry:
+            return
+        with self._answer_lock(self._answer_id(entry.get("terminal_id"), key)):
+            rec = (self.state.get_thread(key) or {}).get("dialog")
+            if rec:
+                self._reconcile_dialog(key, rec, transition=False)
+        entry = self.state.get_thread(key) or {}
+        if entry.get("deferred_prompt") and not entry.get("dialog"):
+            self._submit(self._send_deferred, key, entry.get("terminal_id"))
+
+    def _recheck_idle_dialogs(self) -> None:
+        """Dialogs of agents reported idle (Codex folder trust) produce no transition when they are
+        answered on PC: recheck them now and then."""
+        for key, entry in self.state.all_threads().items():
+            if (entry.get("dialog") or {}).get("idle"):
+                self._notify_q.put(_Reconcile(key))
+
+    def _dialog_message_state(self, channel: str | None, ts: str) -> str | None:
+        """`open` if `ts` is the message of a current dialog record, `closed` if it was one, else None."""
+        for entry in self.state.all_threads().values():
+            rec = entry.get("dialog") or {}
+            if rec.get("message_ts") == ts and (rec.get("channel") or self.dm_channel) == (channel or self.dm_channel):
+                return "open"
+            if ts in (entry.get("closed_dialogs") or []):
+                return "closed"
+        return None
+
+    # --- Slack entry points ---------------------------------------------------------------
+    def dialog_action(self, action_id: str, value: str, trigger_id: str | None, channel: str | None,
+                      message: Mapping | None) -> None:
+        """A dialog button (acked by the caller). The free-text modal opens with the trigger id
+        before any Herdr I/O; everything else runs on a worker."""
+        token, choice = B.parse_dialog_value(value)
+        if action_id == B.ACTION_DIALOG_SCREEN:
+            self._submit(self.show_dialog_screen, channel, message or {})
+        elif action_id.startswith(B.ACTION_DIALOG_TEXT):
+            self.open_dialog_text_modal(trigger_id, token, choice)
+        elif action_id.startswith(B.ACTION_DIALOG_KEY):
+            self._submit(self.answer_dialog, token, ("key", str(choice)), channel, message)
+        elif action_id.startswith(B.ACTION_DIALOG_OPTION):
+            self._submit(self.answer_dialog, token, ("opt", choice), channel, message)
+
+    def open_dialog_text_modal(self, trigger_id: str | None, token: str | None, index) -> None:
+        key = self.state.find_dialog(token)
+        rec = ((self.state.get_thread(key) or {}).get("dialog") or {}) if key else {}
+        options = rec.get("options") or []
+        if not isinstance(index, int) or not 0 <= index < len(options) or not options[index].get("free_text"):
+            self.transport.open_view(trigger_id, B.notice_view("Herdr", DIALOG_GONE_TEXT))
+            return
+        where = {"c": rec.get("channel"), "m": rec.get("message_ts"), "th": rec.get("thread_ts")}
+        self.transport.open_view(trigger_id, B.dialog_text_view(token, index, rec.get("name") or "agent",
+                                                                options[index].get("label") or "",
+                                                                rec.get("question") or "", where,
+                                                                options[index].get("typed")))
+
+    def submit_dialog_text(self, view: Mapping) -> dict | None:
+        """Free-text modal submission (runs before the ack: local checks only)."""
+        token, index, text, where = B.parse_dialog_text_view(view)
+        if not text.strip():
+            return {B.BLOCK_DIALOG_TEXT: "Enter an answer."}
+        message = {"ts": where.get("m"), "thread_ts": where.get("th")} if where.get("m") else None
+        self._submit(self.answer_dialog, token, ("text", index, text), where.get("c"), message)
+        return None
+
+    def show_dialog_screen(self, channel: str | None, message: Mapping) -> None:
+        """[Show screen]: post the last lines of the agent's screen in its thread."""
+        thread_ts = message.get("thread_ts") or message.get("ts")
+        key = self.state.find_session_by_thread(channel, thread_ts) if channel and thread_ts else None
+        entry = self.state.get_thread(key) if key else None
+        if not entry:
+            self._post_safe("This thread is not bound to an agent.", thread_ts)
+            return
+        pane = entry.get("pane_id")
+        if not entry.get("provisional"):
+            try:
+                info = self._find_session_agent(key, pane)
+                pane = info["pane_id"] if info else pane
+            except HerdrError:
+                pass
+        screen = self._visible(pane)
+        if screen is None:
+            self._post_safe("❌ Could not read the agent's screen.", thread_ts)
+            return
+        lines = tail_lines(screen, DIALOG_SCREEN_LINES)
+        try:
+            self._retrying(lambda: self._post("Screen", B.screen_blocks(lines), thread_ts), idempotent=False)
+        except Exception:
+            log.exception("posting the screen failed")
+
+    def answer_dialog(self, token: str | None, choice: tuple, channel: str | None = None,
+                      message: Mapping | None = None) -> None:
+        """Worker: answer the dialog `token` names with an option / key / free text."""
+        key = self.state.find_dialog(token)
+        rec = ((self.state.get_thread(key) or {}).get("dialog") or {}) if key else {}
+        terminal = rec.get("terminal_id")
+        closed = False
+        if rec:
+            with self._answer_lock(self._answer_id(terminal, key)):
+                key = self.state.find_dialog(token)  # re-resolved: the entry may have been re-keyed
+                rec = ((self.state.get_thread(key) or {}).get("dialog") or {}) if key else {}
+                if rec:
+                    closed = self._answer_locked(key, rec, choice)
+        if not rec:
+            self._dialog_gone(channel, message)
+            return
+        if closed:
+            self._send_deferred(key, terminal)
+
+    def answer_thread_reply(self, key: str, target: Target, text: str, thread_ts: str | None) -> None:
+        """Worker: a thread reply while the thread's dialog is open is its free-text answer. If the
+        agent is no longer waiting, the reply is sent as a prompt (normal D6 rules)."""
+        terminal = (self.state.get_thread(key) or {}).get("terminal_id") or target.terminal_id
+        handled = closed = False
+        with self._answer_lock(self._answer_id(terminal, key)):
+            if thread_ts:  # re-resolved: the entry may have been re-keyed meanwhile
+                key = self.state.find_session_by_thread(self.dm_channel, thread_ts) or key
+            rec = (self.state.get_thread(key) or {}).get("dialog")
+            if rec:
+                handled, closed = self._thread_answer_locked(key, rec, text)
+        if closed:
+            self._send_deferred(key, terminal)
+        if not handled:
+            self.send(target, text, None, False, None, thread_ts)
+
+    def _dialog_gone(self, channel: str | None, message: Mapping | None) -> None:
+        """A click whose token is not open. The message of a live dialog (re-rendered under a new
+        token) or of a closed one (showing its outcome) is left as it is."""
+        thread_ts = None
+        if message and message.get("ts"):
+            thread_ts = message.get("thread_ts") or message["ts"]
+            state = self._dialog_message_state(channel, message["ts"])
+            if state == "open":
+                self._post_safe(DIALOG_STALE_TEXT, thread_ts)
+                return
+            if state is None and channel and message.get("blocks") is not None:
+                try:
+                    self.transport.update_message(channel, message["ts"], message.get("text") or DIALOG_GONE_TEXT,
+                                                  B.without_actions(message.get("blocks") or [], DIALOG_GONE_TEXT))
+                except Exception:
+                    log.warning("removing the buttons of a closed dialog failed", exc_info=True)
+        self._post_safe(DIALOG_GONE_TEXT, thread_ts)
+
+    # --- answering (callers hold the agent's answer lock) ----------------------------------
+    def _answer_locked(self, key: str, rec: dict, choice: tuple) -> bool:
+        """Verify, send, confirm. Returns True when the dialog is closed (agent no longer waiting)."""
+        thread_ts = rec.get("thread_ts")
+        try:
+            state, info, dialog, screen = self._dialog_state(rec)
+        except HerdrError as exc:
+            self._post_safe(f"❌ Herdr error: {B.escape(str(exc))}. Nothing was sent.", thread_ts)
+            return False
+        if state == "gone":
+            self._close_dialog(key, rec, f"{AGENT_ENDED}; nothing was sent")
+            return False
+        if state == "answered":
+            self._close_dialog(key, rec, ALREADY_ANSWERED)
+            return True
+        if state == "unreadable":
+            self._post_safe("⚠️ Could not read the agent's screen; nothing was sent.", thread_ts)
+            return False
+        # A keypad's unparsed screen changes by itself (spinners); once it parses as a real dialog
+        # the user has not seen that dialog, so nothing is sent then either.
+        if state == "changed" and not (rec.get("kind") == KEYPAD and dialog is None):
+            if dialog is not None or info.get("agent_status") == "blocked":
+                self._rerender_dialog(key, rec, dialog, screen, note=DIALOG_CHANGED_TEXT)
+                return False
+            self._close_dialog(key, rec, ALREADY_ANSWERED)
+            return True
+        return self._send_answer(key, rec, info, dialog, screen, choice)
+
+    def _thread_answer_locked(self, key: str, rec: dict, text: str) -> tuple[bool, bool]:
+        """(handled, closed) for a thread reply while `rec` is open."""
+        thread_ts = rec.get("thread_ts")
+        try:
+            state, info, dialog, screen = self._dialog_state(rec)
+        except HerdrError as exc:
+            self._post_safe(f"❌ Herdr error: {B.escape(str(exc))}. Nothing was sent.", thread_ts)
+            return True, False
+        if state == "gone":
+            self._close_dialog(key, rec, AGENT_ENDED)
+            return False, False
+        if state == "answered":
+            self._close_dialog(key, rec, ALREADY_ANSWERED)
+            return False, True
+        if state == "unreadable":
+            self._post_safe("⚠️ Could not read the agent's screen; nothing was sent.", thread_ts)
+            return True, False
+        if state == "changed" and not (rec.get("kind") == KEYPAD and dialog is None):
+            self._rerender_dialog(key, rec, dialog, screen, note=DIALOG_CHANGED_TEXT)
+            self._post_safe(DIALOG_CHANGED_TEXT, thread_ts)
+            return True, False
+        option = dialog.free_text_option() if dialog is not None and rec.get("kind") != KEYPAD else None
+        if option is None:
+            self._post_safe(DIALOG_BUTTONS_TEXT, thread_ts)
+            return True, False
+        index = next(i for i, o in enumerate(dialog.options) if o is option)
+        already = typed_text(option)
+        closed = self._send_answer(key, rec, info, dialog, screen, ("text", index, text))
+        if already is not None:
+            # The reply went after the text the row already held: say so, with the text it holds now.
+            now = self._typed_now(key, index) or f"{already}\n{text}"
+            self._post_safe(B.typed_notice(now, sent=True), thread_ts)
+        return True, closed
+
+    def _typed_now(self, key: str, index: int) -> str | None:
+        """The text the open record says row `index` holds now (after a re-render)."""
+        rec = (self.state.get_thread(self._key_now(key, None)) or {}).get("dialog") or {}
+        options = rec.get("options") or []
+        return options[index].get("typed") if 0 <= index < len(options) else None
+
+    @staticmethod
+    def _answer_keys(dialog: Dialog | None, choice: tuple) -> tuple[list[str], str | None, bool, str] | None:
+        """(keys, free text or None, Enter after the text, label for the answered message), or None
+        if the choice does not apply to the live dialog."""
+        if choice[0] == "key":
+            key = choice[1]
+            if key == "submit":
+                keys = submit_keys(dialog) if dialog is not None else None
+                return (keys, None, False, KEY_LABELS[key]) if keys else None
+            return ([key], None, False, KEY_LABELS.get(key, key)) if key in DIALOG_KEYS else None
+        index = choice[1]
+        if dialog is None or not isinstance(index, int) or not 0 <= index < len(dialog.options):
+            return None
+        option = dialog.options[index]
+        label = truncate(f"{option.number}. {option.label}" if option.number is not None else option.label, 200)
+        if choice[0] == "text":
+            # Newlines go as they are: they break the line in the agent's input, they do not submit.
+            text = str(choice[2]).replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+            if not option.free_text or not text.strip():
+                return None
+            keys, enter = text_keys(dialog, index)
+            return keys, text, enter, f"{label}: {truncate(' '.join(text.split()), 200)}"
+        return keys_for(dialog, index), None, False, label
+
+    def _send_answer(self, key: str, rec: dict, info: Mapping, dialog: Dialog | None, screen: str | None,
+                     choice: tuple) -> bool:
+        thread_ts = rec.get("thread_ts")
+        planned = self._answer_keys(dialog, choice)
+        if planned is None:
+            self._post_safe("⚠️ That option is not available any more; nothing was sent.", thread_ts)
+            return False
+        keys, text, enter, label = planned
+        pane = info["pane_id"]
+        try:
+            if keys:
+                self.client.send_keys(pane, keys)
+            if text is not None:
+                if keys:
+                    self.sleep(DIALOG_KEY_GAP)  # the digit / cursor move turns the option into an input
+                self.client.send_text(pane, text)
+                if enter:
+                    self.sleep(DIALOG_KEY_GAP)
+                    self.client.send_keys(pane, ["enter"])
+        except HerdrError as exc:
+            self._post_safe(f"❌ Could not send the answer to *{B.escape(rec.get('name') or 'agent')}*: "
+                            f"{B.escape(str(exc))}. Check the screen.", thread_ts)
+            return False
+        return self._confirm_answer(key, rec, label, dialog, screen)
+
+    def _confirm_answer(self, key: str, rec: dict, label: str, dialog: Dialog | None, screen: str | None) -> bool:
+        """Poll until the dialog changed (edit the message: next question, toggled box, ...) or the
+        agent stopped waiting (answered). The screen lags the keys, so a changed dialog must read
+        the same twice before it is shown. Returns True when the dialog is closed."""
+        deadline = self.clock() + DIALOG_POLL_TIMEOUT
+        candidate = None
+        while True:
+            self.sleep(DIALOG_POLL_INTERVAL)
+            try:
+                state, _, live, live_screen = self._dialog_state(rec)
+            except HerdrError as exc:
+                log.warning("confirming a dialog answer: %s", exc)
+                state = "unreadable"
+            if state == "gone":
+                self._close_dialog(key, rec, f"⏹ *{B.escape(label)}* — sent, then the agent ended")
+                return False
+            if state == "answered":
+                self._close_dialog(key, rec, f"✅ *{B.escape(label)}* — answered from Slack")
+                return True
+            if state == "changed":
+                fp = live.fingerprint if live is not None else screen_fingerprint(live_screen or "")
+                if fp == candidate:
+                    self._rerender_dialog(key, rec, live, live_screen)
+                    return False
+                candidate = fp
+            else:
+                candidate = None
+                if state == "open":
+                    dialog, screen = live, live_screen
+            if self.clock() >= deadline:
+                # New token, same buttons: a click queued behind this answer is out of date now and
+                # cannot press the key a second time.
+                new = self._rerender_dialog(key, rec, dialog, screen, note=UNCONFIRMED_TEXT)
+                try:
+                    self._retrying(lambda: self._post(UNCONFIRMED_TEXT, B.dialog_unconfirmed_blocks(new["token"]),
+                                                      rec.get("thread_ts")), idempotent=False)
+                except Exception:
+                    log.exception("posting the unconfirmed-answer notice failed")
+                return False
+
+    # --- a new agent's first prompt, held while its startup dialog was open -------------------
+    def _send_deferred(self, key: str, terminal_id: str | None = None) -> None:
+        key = self._key_now(key, terminal_id)
+        with self._lock(key):
+            entry = self.state.get_thread(key) or {}
+            deferred = entry.get("deferred_prompt")
+            if not deferred or entry.get("dialog"):
+                return
+            self.state.upsert_thread(key, deferred_prompt=None)  # whoever takes it sends it (once)
+        log.info("sending the deferred first prompt of %s (dropped if the bridge stops now)", key)
+        name = entry.get("agent_name") or "agent"
+        thread_ts = entry.get("thread_ts")
+        target = Target(entry.get("pane_id") or "", None if entry.get("provisional") else key,
+                        entry.get("terminal_id"), name, key)
+        try:
+            info, _ = self._resolve(target)
+        except HerdrError as exc:
+            info = None
+            log.warning("sending the deferred prompt of %s: %s", key, exc)
+        if info is not None:
+            expected = {"session": session_of(info), "terminal_id": info.get("terminal_id")}
+            info = self._wait_settled(info["pane_id"], info, expected)
+        status = (info or {}).get("agent_status")
+        if status == "blocked":
+            # Another dialog came up: keep the prompt until that one is answered too.
+            with self._lock(key):
+                self.state.upsert_thread(key, deferred_prompt=deferred)
+            return
+        if info is None or status not in SETTLED:
+            self._post_safe(f"⚠️ *{B.escape(name)}* is not ready ({status or 'gone'}); its first prompt was not "
+                            "sent. Use send when it is idle.", thread_ts)
+            return
+        if (info.get("agent") or entry.get("kind")) == KIND_CODEX and self.cfg.codex_prompt_delay > 0:
+            self.sleep(self.cfg.codex_prompt_delay)
+        self.send(Target(info["pane_id"], expected.get("session"), expected.get("terminal_id"),
+                         info.get("name") or name, key), deferred.get("text") or "", None, fresh=True)
+
+    # =====================================================================================
     # Notifications (single notifier thread)
     # =====================================================================================
     def enqueue_transition(self, transition: AgentTransition) -> None:
@@ -1448,8 +2122,15 @@ class Bridge:
         self.transport.publish_view(user, view)
 
     def _notify_loop(self) -> None:
+        last_recheck = time.monotonic()
         while True:
-            item = self._notify_q.get()
+            if time.monotonic() - last_recheck >= IDLE_DIALOG_RECHECK and not self._stopping.is_set():
+                last_recheck = time.monotonic()  # also under steady traffic from other agents
+                self._recheck_idle_dialogs()
+            try:
+                item = self._notify_q.get(timeout=IDLE_DIALOG_RECHECK)
+            except queue.Empty:
+                continue
             try:
                 if item is None:
                     return
@@ -1466,6 +2147,8 @@ class Bridge:
             try:
                 if isinstance(item, _Resume):
                     self.handle_resume(item.key, item.task_id)
+                elif isinstance(item, _Reconcile):
+                    self.handle_reconcile(item.key)
                 else:
                     self.handle_transition(item)
                 return True
@@ -1487,13 +2170,32 @@ class Bridge:
     def handle_transition(self, t: AgentTransition) -> None:
         """Idempotent: Slack failures propagate (for retry); state changes only after a post succeeds.
         Runs under the thread lock, so admission can't create a second root meanwhile (R2)."""
-        with self._admission_lock:
-            self._handle_transition(t)
+        # The agent's answer lock first (a click in flight finishes before its transition is
+        # handled), then the admission lock: waiting for a click never blocks admission.
+        with self._answer_lock(self._transition_answer_id(t)):
+            with self._admission_lock:
+                deferred = self._handle_transition(t)
+        if deferred:
+            self._submit(self._send_deferred, deferred, (t.info or {}).get("terminal_id"))
 
-    def _handle_transition(self, t: AgentTransition) -> None:
+    def _handle_transition(self, t: AgentTransition) -> str | None:
+        """Returns the thread key whose deferred first prompt can be sent now, if any."""
         key = self._transition_key(t)
         if not key:
-            return
+            return None
+        rec = (self.state.get_thread(key) or {}).get("dialog")
+        if rec:
+            if t.ended:
+                self._close_dialog(key, rec, AGENT_ENDED)
+            else:
+                self._reconcile_dialog(key, rec)
+        self._notify_transition(key, t)
+        entry = self.state.get_thread(key) or {}
+        if not t.ended and t.status in SETTLED and entry.get("deferred_prompt") and not entry.get("dialog"):
+            return key
+        return None
+
+    def _notify_transition(self, key: str, t: AgentTransition) -> None:
         with self._lock(key):
             entry = self.state.get_thread(key)
             if t.ended:
@@ -1538,11 +2240,13 @@ class Bridge:
                     fields["pending_task"] = dict(current, working_announced=True)
                 self._commit(key, op, **fields)
             elif decision.action is Action.BLOCKED:
-                name = _display(info, entry)
-                op = f"blocked:{info.get('terminal_id') or key}:{seq or t.at}"
-                self._post(f"⚠️ {name} needs confirmation on PC", B.blocked_blocks(name, ws_label), thread_ts,
-                           op=op, key=key)
-                self._commit(key, op, **({"last_blocked_seq": seq} if seq else {}))
+                fields = {"last_blocked_seq": seq} if seq else {}
+                if entry.get("dialog"):  # the open dialog message shows it already (reconciled above)
+                    if fields:
+                        self._commit(key, None, **fields)
+                else:
+                    op = f"blocked:{info.get('terminal_id') or key}:{seq or t.at}"
+                    self._open_dialog(key, entry, info, ws_label, op, **fields)
             elif decision.action is Action.COMPLETED:
                 op = _result_op(key, pending, info, t.at)
                 self.post_result(key, entry, info, ws_label, pending, op=op)
@@ -1646,12 +2350,15 @@ class Bridge:
                 return
         elif decision.action is Action.BLOCKED:
             if not seq or seq > int(entry.get("last_blocked_seq") or 0):
+                fields = dict({"last_blocked_seq": seq} if seq else {}, **cleared)
+                if entry.get("dialog"):
+                    self._commit(key, None, **fields)
+                    return
                 ws_label = self._ws_labels().get(info.get("workspace_id"), info.get("workspace_id") or "")
-                name = _display(info, entry)
+                info = dict(info)
+                info.setdefault("pane_id", entry.get("pane_id"))
                 op = f"blocked:{info.get('terminal_id') or key}:{seq or task_id}"
-                self._post(f"⚠️ {name} needs confirmation on PC", B.blocked_blocks(name, ws_label),
-                           entry.get("thread_ts"), op=op, key=key)
-                self._commit(key, op, **({"last_blocked_seq": seq} if seq else {}), **cleared)
+                self._open_dialog(key, entry, info, ws_label, op, **fields)
                 return
         elif decision.clear_pending:
             name = B.escape(entry.get("agent_name") or key[:8])
@@ -1675,6 +2382,16 @@ def _result_op(key: str, pending: Mapping | None, info: Mapping | None, at: floa
 def _display(info: Mapping | None, entry: Mapping | None) -> str:
     info, entry = info or {}, entry or {}
     return info.get("name") or entry.get("agent_name") or info.get("pane_id") or entry.get("pane_id") or "agent"
+
+
+def _typed_row_hint(rec: Mapping) -> int | None:
+    """Index of the multi-select free-text row the record showed (evidence for the parser)."""
+    return next((i for i, o in enumerate(rec.get("options") or [])
+                 if o.get("free_text") and o.get("checked") is not None), None)
+
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
 def _strip_mrkdwn(text: str) -> str:
