@@ -236,6 +236,12 @@ def last_answer_from_lines(lines: Iterable[str], since: float | None = None,
 
 def read_tail(path: Path, max_bytes: int = TAIL_BYTES) -> tuple[list[str], bool]:
     """(lines, tail_complete): tail_complete is False when the file does not end with a newline."""
+    lines, complete, _ = _read_tail(path, max_bytes)
+    return lines, complete
+
+
+def _read_tail(path: Path, max_bytes: int) -> tuple[list[str], bool, bool]:
+    """(lines, tail_complete, cut): cut is True when the read started after the file's start."""
     with open(path, "rb") as f:
         f.seek(0, os.SEEK_END)
         size = f.tell()
@@ -245,7 +251,7 @@ def read_tail(path: Path, max_bytes: int = TAIL_BYTES) -> tuple[list[str], bool]
     lines = data.decode("utf-8", "replace").splitlines()
     if start > 0 and lines:
         lines = lines[1:]  # first line is probably partial
-    return lines, (not data or data.endswith(b"\n"))
+    return lines, (not data or data.endswith(b"\n")), start > 0
 
 
 def read_tail_lines(path: Path, max_bytes: int = TAIL_BYTES) -> list[str]:
@@ -274,6 +280,98 @@ def last_answer(session_id: str, cwd: str | None, since: float | None = None,
         if attempt < retries:
             sleep(retry_delay)
     log.info("transcript %s still incomplete after %d reads; using the screen", path, retries + 1)
+    return None
+
+
+# --- conversation history (send modal) ---------------------------------------------------
+
+CONVERSATION_TAIL_BYTES = 4 * 1024 * 1024
+_REMINDER_RE = re.compile(r"<system-reminder>.*?(</system-reminder>|\Z)", re.S)
+
+
+@dataclass(frozen=True)
+class Turn:
+    role: str  # "user" | "assistant"
+    text: str
+    at: float | None
+
+
+@dataclass(frozen=True)
+class Conversation:
+    turns: list[Turn]
+    truncated: bool  # the tail read started mid-file: older messages are missing
+
+
+def _prompt_text(entry: dict) -> str:
+    """A prompt's visible text: text blocks (system reminders and command bookkeeping removed),
+    images as `[image]`."""
+    parts = []
+    for block in _blocks(entry):
+        kind = block.get("type")
+        if kind == "image":
+            parts.append("[image]")
+        elif kind == "text":
+            text = _REMINDER_RE.sub("", str(block.get("text", ""))).strip()
+            if text and not text.startswith(_COMMAND_PREFIXES):
+                parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _final_text(turn: list[dict], last: bool) -> tuple[str, float | None] | None:
+    """(text, at) of a turn's answer, by the `evaluate_lines` rule: the text blocks of the turn's
+    last assistant message. None when the turn was interrupted, stopped at a tool call, or (for the
+    latest turn) the message is not finished yet."""
+    if any(_is_interrupt(e) for e in turn):
+        return None
+    assistants = [e for e in turn if e.get("type") == "assistant" and _message(e)]
+    if not assistants:
+        return None
+    last_id = _message(assistants[-1]).get("id")
+    final = [e for e in assistants if _message(e).get("id") == last_id]
+    stops = {_message(e).get("stop_reason") for e in final}
+    if "tool_use" in stops or any(b.get("type") == "tool_use" for e in final for b in _blocks(e)):
+        return None
+    if last and not stops & TERMINAL_STOP_REASONS:
+        return None  # the latest answer may still be streaming
+    text = "\n\n".join(
+        str(b.get("text", "")).strip()
+        for e in final for b in _blocks(e)
+        if b.get("type") == "text" and str(b.get("text", "")).strip()
+    )
+    return (text, _ts(final[-1])) if text else None
+
+
+def conversation_from_lines(lines: Iterable[str]) -> list[Turn]:
+    """User prompts and the agent's final answers, oldest first. Tool calls/results, thinking,
+    meta/command records, interrupts and sidechains are left out; an unanswered or interrupted
+    prompt has no assistant entry. Records before the first prompt (a cut-off tail) are dropped."""
+    entries, _ = _decode(lines)
+    entries = [e for e in entries if _well_formed(e)]
+    # a prompt record carrying only a system reminder / command output does not start a turn
+    starts = [i for i, e in enumerate(entries) if _is_prompt(e) and _prompt_text(e)]
+    turns: list[Turn] = []
+    for n, start in enumerate(starts):
+        turns.append(Turn("user", _prompt_text(entries[start]), _ts(entries[start])))
+        end = starts[n + 1] if n + 1 < len(starts) else len(entries)
+        answer = _final_text(entries[start + 1:end], last=n + 1 == len(starts))
+        if answer is not None:
+            turns.append(Turn("assistant", answer[0], answer[1]))
+    return turns
+
+
+def conversation(session_id: str, cwd: str | None, base: Path | None = None,
+                 max_bytes: int = CONVERSATION_TAIL_BYTES) -> Conversation | None:
+    """The session's conversation from its JSONL tail, or None without a usable transcript."""
+    path = find_session_file(session_id, cwd, base)
+    if path is None:
+        return None
+    try:
+        lines, _, cut = _read_tail(path, max_bytes)
+        return Conversation(conversation_from_lines(lines), cut)
+    except OSError as exc:
+        log.warning("cannot read %s: %s", path, exc)
+    except (TypeError, ValueError, AttributeError, KeyError) as exc:
+        log.warning("unusable transcript %s: %s", path, exc)
     return None
 
 

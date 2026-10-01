@@ -26,7 +26,7 @@ Slack DM ──(Socket Mode)──> herdr-slackbot 브리지 ──(named pipe)�
 
 ![새 에이전트 모달: Model, Effort, Permission mode, Name, Prompt 입력](docs/images/new-agent-modal.png)
 
-**보내기 (`/herdr send`, [📤 Send]):** 실행 중인 에이전트를 골라 프롬프트를 보냅니다. 에이전트를 고르면 그 에이전트의 마지막 응답이 모달에 표시됩니다. 작업 결과는 에이전트별 DM 스레드로 옵니다.
+**보내기 (`/herdr send`, [📤 Send]):** 실행 중인 에이전트를 골라 프롬프트를 보냅니다. 에이전트를 고르면 지금까지의 대화(내가 보낸 프롬프트와 에이전트의 답변, 최신이 맨 아래)가 모달에 표시됩니다. 작업 결과는 에이전트별 DM 스레드로 옵니다.
 
 ![보내기 모달: Agent 선택과 Prompt 입력](docs/images/send-modal.png)
 
@@ -239,7 +239,7 @@ notepad "$(herdr plugin config-dir herdr-slackbot)\.env"
 | `/herdr list` | 에이전트 목록 (워크스페이스별, 상태 이모지) |
 | `/herdr new` | 모달로 새 에이전트 시작: 워크스페이스, cwd, 종류(claude/codex), 모델, effort, 권한 모드, 이름, 프롬프트 |
 | `/herdr new <workspace> [name=..] [kind=claude\|codex] [model=..] [effort=..] [mode=..] [cwd=..] <prompt>` | 모달 없이 바로 시작 |
-| `/herdr send` | 모달로 실행 중인 에이전트에 프롬프트 전송. 에이전트를 고르면 Agent와 Prompt 사이에 그 에이전트의 **마지막 응답**(시각·소요 시간 포함)이 표시됩니다. 길면 끝부분 약 2500자만 보여 줍니다. Home 탭의 Send 버튼에서도 같은 모달이 열립니다. |
+| `/herdr send` | 모달로 실행 중인 에이전트에 프롬프트 전송. 에이전트를 고르면 Agent와 Prompt 사이에 **지금까지의 대화**가 표시됩니다. 내가 보낸 프롬프트(PC에서 입력한 것 포함)와 에이전트의 최종 답변이 오래된 것부터 차례로 나옵니다. 긴 답변은 끝부분 약 2500자, 긴 프롬프트는 앞부분만 보여 주고, 다 들어가지 않는 오래된 메시지는 "… N earlier messages not shown" 한 줄로 줄입니다. 작업 중이거나 응답을 기다리는(blocked) 에이전트는 대화와 함께 안내 한 줄이 붙습니다. Claude는 세션 기록(JSONL)에서 읽고, Codex이거나 기록을 찾지 못하면 이전처럼 **마지막 응답**(시각·소요 시간 포함)을 보여 줍니다. Home 탭의 Send 버튼에서도 같은 모달이 열립니다. |
 | `/herdr send <에이전트 이름\|pane id> <prompt>` | 바로 전송 |
 | `/herdr status` | 브리지 상태 |
 | `/herdr pair <code>` | 페어링 모드에서 본인 계정 연결 (위의 **페어링** 참고). 페어링 후에는 거절됩니다. |

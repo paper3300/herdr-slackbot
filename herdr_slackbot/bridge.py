@@ -50,6 +50,7 @@ from typing import Callable, Mapping
 
 from . import blocks as B
 from .agents import (
+    KIND_CLAUDE,
     KIND_CODEX,
     KIND_SPECS,
     LaunchError,
@@ -57,7 +58,7 @@ from .agents import (
     codex_home,
     codex_model_options,
 )
-from .claude_session import agent_result
+from .claude_session import agent_result, conversation as claude_conversation
 from .commands import (
     parse_command,
     parse_new_args,
@@ -1128,7 +1129,7 @@ class Bridge:
         if target:
             self._submit(self._load_preview, view_id, 1, target)
 
-    # --- send modal: last-response preview -------------------------------------------------
+    # --- send modal: conversation preview --------------------------------------------------
     #
     # Concurrency: `_send_lock` only guards the per-view records (short, no I/O), so a view
     # submission never waits for preview work. Each record has a generation `gen`, bumped by
@@ -1223,10 +1224,23 @@ class Bridge:
             self._submit(self._load_preview, view_id, gen, target)
 
     def preview_blocks(self, agent: Mapping | None) -> list:
-        """The agent's last response (same source as completion results), never raising."""
+        """The conversation so far (Claude session JSONL), else the agent's last response (same
+        source as completion results). Never raises."""
         if agent is None:
             return B.last_response_blocks(None, note=B.PREVIEW_FAILED)
-        if (agent.get("agent_status") or "") in ("working", "blocked"):
+        status = agent.get("agent_status") or ""
+        session = session_of(agent)
+        if agent.get("agent") == KIND_CLAUDE and session:
+            try:
+                conv = claude_conversation(session, agent.get("cwd"), base=self.claude_projects)
+            except Exception:  # never let a transcript problem block the fallback
+                log.exception("reading the Claude conversation for the send modal failed")
+                conv = None
+            if conv is not None and conv.turns:
+                note = {"working": B.PREVIEW_WORKING, "blocked": B.PREVIEW_BLOCKED}.get(status)
+                return B.conversation_blocks(conv.turns, agent_display_name(agent), time.time(),
+                                             omitted=conv.truncated, note=note)
+        if status in ("working", "blocked"):
             return B.last_response_blocks(None, note=B.PREVIEW_BUSY)
         try:
             pane = agent.get("pane_id")
@@ -1236,11 +1250,7 @@ class Bridge:
         except Exception:
             log.exception("loading the last response for the send modal failed")
             return B.last_response_blocks(None, note=B.PREVIEW_FAILED)
-        when = ""
-        if res.at:
-            ago = max(0.0, time.time() - res.at)
-            when = "just now" if ago < 60 else f"{int(ago // 60)} min ago" if ago < 3600 else \
-                time.strftime("%m-%d %H:%M", time.localtime(res.at))
+        when = B.relative_time(res.at, time.time())
         return B.last_response_blocks(res.text, when, res.duration or "", markdown=res.source != "tail")
 
     def _load_preview(self, view_id: str, gen: int, target: str) -> None:

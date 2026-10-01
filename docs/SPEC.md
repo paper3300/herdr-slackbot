@@ -48,7 +48,7 @@ Bot DM features:
 - Read `herdr agent read <target> --source recent-unwrapped --lines 200` (fresh sessions have blank padding at bottom → drop blanks).
 - Claude parse: strip everything from the prompt box (`───` line / `❯` prompt line at the bottom) downward; the response sits between the echoed `❯ <prompt>` line and `✻ ... done`-style line; take the last `●` block through the `✻ …` line; if a `※ recap` line exists, put it on top as summary.
 - Fallback (codex, parse failure): raw last N non-blank lines (e.g. 40).
-- Over 3000 chars → truncate + `[전체 보기]` button that uploads the full text as `.md` file into the thread (`files_upload_v2`).
+- Over 3000 chars → truncate + `[View full]` button that uploads the full text as `.md` file into the thread (`files_upload_v2`).
 - Header: `✅ <name> · <workspace label> · <duration>` plus small context line with cwd / terminal title. Blocked: `⚠️ <name> · <workspace label> is waiting for your answer` + the dialog.
 - Parser must be a pure function with unit tests (use fixture transcripts; include long / multi-tool outputs).
 
@@ -101,7 +101,7 @@ Replaces "confirm on PC": a blocked agent's dialog is answered from Slack.
 - Message: one button per option (`"<n>. <label>"`, ≤75 chars; the full label stays in the text),
   multi-select ☐/☑ + [Next →] (cursor to the Submit row + Enter), free-text options open a modal, always
   [Esc] and [Show screen].
-  Plan text comes from the plan file named in the dialog footer (else the screen), with [전체 보기].
+  Plan text comes from the plan file named in the dialog footer (else the screen), with [View full].
   Button values carry only `{"t": token, "o": option index | key}`.
 - Pending record in the thread entry (`dialog`): token, fingerprint, kind, options, message ts, agent
   session / terminal / pane. Before sending keys the live agent must be the same session, still

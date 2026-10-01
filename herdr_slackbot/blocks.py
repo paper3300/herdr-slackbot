@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Sequence
 
@@ -48,6 +49,14 @@ PREVIEW_EMPTY = "No messages yet"
 PREVIEW_FAILED = "Couldn't load the conversation"
 PREVIEW_BUSY = "Working — no answer yet"
 PREVIEW_PICK = "Pick an agent to see the conversation here"
+PREVIEW_WORKING = "Working — the current turn is not finished yet"
+PREVIEW_BLOCKED = "Waiting for an answer on a dialog"
+PREVIEW_OMITTED = "… earlier messages omitted"
+PREVIEW_HEAD_CUT_MARK = "…(rest omitted)"
+PREVIEW_USER_CHARS = 1500  # a prompt keeps its start, an answer its end (PREVIEW_CHARS)
+PREVIEW_MAX_BLOCKS = 40  # conversation blocks in the send modal (Slack: <= 100 per view)
+PREVIEW_MAX_TOTAL_CHARS = 12000
+BLOCK_PREVIEW_PREFIX = "preview_"  # conversation blocks: preview_0, preview_1, ...
 BLOCK_WS = "ws"
 BLOCK_KIND = "kind"
 BLOCK_PERM = "perm"
@@ -451,10 +460,82 @@ def last_response_blocks(text: str | None, when: str = "", duration: str = "", m
             section(body[-SECTION_MAX:], block_id=BLOCK_PREVIEW_BODY)]
 
 
+def head_excerpt(text: str, limit: int) -> tuple[str, bool]:
+    """The FIRST ~`limit` chars of `text`, cut at a line boundary when one is near. Returns
+    (excerpt, cut); a fence left open is closed by `to_mrkdwn`."""
+    if len(text) <= limit:
+        return text, False
+    end = text.rfind("\n", 0, limit)
+    if end == -1 or limit - end > limit * 0.2:
+        end = limit
+    return text[:end], True
+
+
+def relative_time(at: float | None, now: float) -> str:
+    if not at:
+        return ""
+    ago = max(0.0, now - at)
+    if ago < 60:
+        return "just now"
+    if ago < 3600:
+        return f"{int(ago // 60)} min ago"
+    return time.strftime("%m-%d %H:%M", time.localtime(at))
+
+
+def _message_body(text: str, keep_tail: bool, limit: int) -> str:
+    """mrkdwn of one conversation message within SECTION_MAX: answers keep their end (the
+    conclusion), prompts their start; a cut is marked."""
+    text = text.strip("\n")
+    while True:
+        excerpt, cut = tail_excerpt(text, limit) if keep_tail else head_excerpt(text, limit)
+        body = to_mrkdwn(excerpt)
+        if cut:
+            body = PREVIEW_CUT_MARK + "\n" + body if keep_tail else body + "\n" + PREVIEW_HEAD_CUT_MARK
+        if len(body) <= SECTION_MAX or limit < 200:
+            return body[-SECTION_MAX:] if keep_tail else body[:SECTION_MAX]
+        limit = int(limit * 0.8)  # escaping made it longer: take less
+
+
+def conversation_blocks(turns: Sequence, agent_label: str, now: float, *, omitted: bool = False,
+                        note: str | None = None) -> list:
+    """The conversation for the send modal, oldest first (newest right above the Prompt input).
+    Filled newest-first within PREVIEW_MAX_BLOCKS / PREVIEW_MAX_TOTAL_CHARS; older messages that
+    do not fit become one line at the top. `turns` have `.role`, `.text`, `.at`; `omitted` = the
+    source itself lacks older messages; `note` (working/blocked) goes below the newest message."""
+    room = PREVIEW_MAX_BLOCKS - 1 - (1 if note else 0)  # one line kept for "earlier messages"
+    chars = 0
+    shown: list[list] = []
+    for turn in reversed(turns):
+        user = turn.role == "user"
+        body = _message_body(turn.text, keep_tail=not user,
+                             limit=PREVIEW_USER_CHARS if user else PREVIEW_CHARS)
+        if shown and (2 * (len(shown) + 1) > room or chars + len(body) > PREVIEW_MAX_TOTAL_CHARS):
+            break
+        who = "👤 You" if user else f"🤖 {escape(agent_label)}"
+        shown.append([context(" · ".join(p for p in (who, relative_time(turn.at, now)) if p)), section(body)])
+        chars += len(body)
+    hidden = len(turns) - len(shown)
+    blocks: list = []
+    if hidden:
+        blocks.append(context(f"_… {hidden}{'+' if omitted else ''} earlier "
+                              f"message{'s' if hidden != 1 or omitted else ''} not shown_"))
+    elif omitted:
+        blocks.append(context(f"_{PREVIEW_OMITTED}_"))
+    for pair in reversed(shown):
+        blocks.extend(pair)
+    if note:
+        blocks.append(context(f"_{escape(note)}_"))
+    if not blocks:
+        blocks.append(context(f"_{PREVIEW_EMPTY}_"))
+    for i, block in enumerate(blocks):
+        block["block_id"] = f"{BLOCK_PREVIEW_PREFIX}{i}"
+    return blocks
+
+
 def send_view(agents: Sequence[Mapping], workspace_labels: Mapping[str, str],
               initial_target: str | None = None, metadata: dict | None = None,
               preview: list | None = None, prompt: str = "") -> dict:
-    """Send modal. The agent select dispatches (-> last-response preview between Agent and
+    """Send modal. The agent select dispatches (-> conversation preview between Agent and
     Prompt). Block ids stay fixed so Slack keeps what the user selected/typed across updates."""
     options = [option(agent_option_label(a, workspace_labels), a.get("name") or a["pane_id"]) for a in agents]
     if initial_target and all(o["value"] != initial_target for o in options[:MAX_OPTIONS]):

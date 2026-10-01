@@ -26,7 +26,7 @@ Slack DM ──(Socket Mode)──> herdr-slackbot bridge ──(named pipe)─�
 
 ![New agent modal: Model, Effort, Permission mode, Name and Prompt fields](docs/images/new-agent-modal.png)
 
-**Send (`/herdr send`, [📤 Send]):** Pick a running agent and send it a prompt. Once you pick an agent, its last response is shown in the modal. Results come back in that agent's DM thread.
+**Send (`/herdr send`, [📤 Send]):** Pick a running agent and send it a prompt. Once you pick an agent, the conversation so far (your prompts and its answers, newest at the bottom) is shown in the modal. Results come back in that agent's DM thread.
 
 ![Send modal: agent picker and Prompt field](docs/images/send-modal.png)
 
@@ -239,7 +239,7 @@ Below, `/herdr` stands for your own `SLASH_COMMAND` (e.g. `/herdr-kim`). Use it 
 | `/herdr list` | List agents (by workspace, with status emoji) |
 | `/herdr new` | Start a new agent from a modal: workspace, cwd, kind (claude/codex), model, effort, permission mode, name, prompt |
 | `/herdr new <workspace> [name=..] [kind=claude\|codex] [model=..] [effort=..] [mode=..] [cwd=..] <prompt>` | Start directly, without the modal |
-| `/herdr send` | Send a prompt to a running agent from a modal. Once you pick an agent, its **last response** (with time and duration) is shown between Agent and Prompt; long responses show only the last ~2500 characters. The Send button on the Home tab opens the same modal. |
+| `/herdr send` | Send a prompt to a running agent from a modal. Once you pick an agent, the **conversation so far** is shown between Agent and Prompt: your prompts (including ones typed on the PC) and the agent's final answers, oldest at the top. Long answers show only their last ~2500 characters, long prompts their start; older messages that do not fit are summarized as "… N earlier messages not shown". For a working or blocked agent the history is shown with a note. Claude conversations come from the session transcript; for Codex (or when no transcript is found) the agent's **last response** (with time and duration) is shown instead. The Send button on the Home tab opens the same modal. |
 | `/herdr send <agent name\|pane id> <prompt>` | Send directly |
 | `/herdr status` | Bridge status |
 | `/herdr pair <code>` | Link your account in pairing mode (see **Pairing** above). Rejected once paired. |
