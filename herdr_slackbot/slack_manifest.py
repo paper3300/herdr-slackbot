@@ -18,7 +18,7 @@ METHOD_SCOPES: dict[str, frozenset[str]] = {
     "chat_postMessage": frozenset({"chat:write"}),
     "chat_update": frozenset({"chat:write"}),
     "chat_postEphemeral": frozenset({"chat:write"}),
-    "files_upload_v2": frozenset({"files:write"}),      # [전체 보기] full-text upload
+    "files_upload_v2": frozenset({"files:write"}),      # [View full] full-text upload
     "conversations_history": frozenset({"im:history"}),  # reconcile a post with an unknown outcome
     "conversations_replies": frozenset({"im:history"}),
     "views_open": frozenset(),                          # modals: trigger id only

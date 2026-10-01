@@ -18,19 +18,17 @@ Slack DM ──(Socket Mode)──> herdr-slackbot bridge ──(named pipe)─�
 
 ## Screenshots
 
-**Home tab:** Open the bot to see the agents on your PC, grouped by workspace. Each row shows status emoji · name/pane · kind · status · terminal title. The buttons at the top start a new agent or send a prompt, and idle/done agents have their own **[보내기]** (Send) button on the row.
+**Home tab:** Open the bot to see the agents on your PC, grouped by workspace. Each row shows status emoji · name/pane · kind · status · terminal title. The buttons at the top start a new agent or send a prompt, and idle/done agents have their own **[Send]** button on the row.
 
-![Home tab: agents grouped by workspace, with New agent / Send / Refresh buttons](docs/images/home-tab.png)
+![Home tab: agents grouped by workspace, with New Agent / Send / Refresh buttons](docs/images/home-tab.png)
 
-**New agent (`/herdr new`, [➕ 새 에이전트]):** Opens a new tab in the chosen workspace and starts an agent there. You can pick the model, effort and permission mode; the defaults are Opus · high · auto. Leave the name blank to get `slack-<N>`.
+**New agent (`/herdr new`, [➕ New Agent]):** Opens a new tab in the chosen workspace and starts an agent there. You can pick the model, effort and permission mode; the defaults are Opus · high · auto. Leave the name blank to get `slack-<N>`.
 
 ![New agent modal: Model, Effort, Permission mode, Name and Prompt fields](docs/images/new-agent-modal.png)
 
-**Send (`/herdr send`, [📤 보내기]):** Pick a running agent and send it a prompt. Once you pick an agent, its last response is shown in the modal. Results come back in that agent's DM thread.
+**Send (`/herdr send`, [📤 Send]):** Pick a running agent and send it a prompt. Once you pick an agent, its last response is shown in the modal. Results come back in that agent's DM thread.
 
 ![Send modal: agent picker and Prompt field](docs/images/send-modal.png)
-
-> The Slack UI labels are currently in Korean: 새 에이전트 = New agent, 보내기 = Send, 새로고침 = Refresh, 전체 보기 = View full.
 
 ## Quick start
 
@@ -149,7 +147,7 @@ The manifest contains the settings below. They are derived from the Slack APIs t
 | Events | `message.im` (DM thread replies), `app_home_opened` (Home tab refresh) |
 | App Home | Home tab on, messages tab on (input allowed) |
 | Slash command | `SLASH_COMMAND` from `.env` |
-| Bot scopes | `chat:write` (post, update, ephemeral messages), `commands`, `im:write` (open DMs), `im:history` (receive DM messages), `files:write` ([전체 보기] / View full file upload) |
+| Bot scopes | `chat:write` (post, update, ephemeral messages), `commands`, `im:write` (open DMs), `im:history` (receive DM messages), `files:write` ([View full] file upload) |
 
 #### Updating the manifest of an existing app (e.g. to add the Home tab)
 
@@ -260,7 +258,7 @@ Below, `/herdr` stands for your own `SLASH_COMMAND` (e.g. `/herdr-kim`). Use it 
   - The 🔕 button in a thread mutes that agent. Results of work sent from Slack arrive regardless of mute.
 - **Result text:**
   - For claude, the last answer is read from the session JSONL, falling back to parsing the screen. For codex, the end of the screen is sent.
-  - Over 3000 characters, the text is truncated and a **[전체 보기]** (View full) button uploads the full content as a `.md` file.
+  - Over 3000 characters, the text is truncated and a **[View full]** button uploads the full content as a `.md` file.
 
 ### Answering dialogs
 
@@ -269,7 +267,7 @@ When an agent becomes `blocked`, the thread gets a **"⚠️ <name> · <workspac
 - **Supported:** Claude permission prompts (Bash etc.), AskUserQuestion (single choice, multiple choice, multiple questions, free text), plan approval (ExitPlanMode), the folder trust prompt at startup (Claude, Codex), and Codex command approval.
 - **Buttons:** Each option gets a button like `1. Yes`. "Always allow / don't ask again" options show up as buttons too. Multiple choice uses ☐/☑ toggle buttons, and **[Next →]** moves the cursor to the question's Submit row and presses Enter (the next question, or the review screen). **[Esc]** and **[Show screen]** (posts the last 40 lines of the screen to the thread) are always there.
 - **Free text:** The "Type something." / "Tell Claude what to change" button opens an input modal. Replying in the thread gives the same answer. Several lines are sent as they are (a line break only breaks the line in the agent's input; it does not submit). In a multiple-choice question the typed text also ticks the "Type something" box; press **[Next →]** to submit the question. Replying to a question without a free-text option gets "This question needs one of the buttons above."
-- **Plan approval:** The plan file (`~\.claude\plans\…md`) is read and its text shown; long plans get **[전체 보기]** (View full) to upload the whole thing.
+- **Plan approval:** The plan file (`~\.claude\plans\…md`) is read and its text shown; long plans get **[View full]** to upload the whole thing.
 - **Safeguards:** Pressing a button first re-checks the agent and the screen. If you already answered on the PC or the question changed in the meantime (including a different plan behind the same approval question), no keys are sent and only the message is updated. Pressing twice still sends the keys once; a button from an older version of the message only gets "That button was out of date".
 - **After answering:** If another question follows, the same message is replaced with the new question. When the agent moves on, the message becomes `✅ <choice> — answered from Slack` and the buttons disappear. If you answer on the PC, it becomes `✅ answered on PC` (also after a bridge restart). If the screen doesn't change within 5 seconds, the buttons stay and you get "Could not confirm the answer".
 - **When the screen can't be read:** A keypad (`1`–`4`, `↑`, `↓`, Enter, Esc) and the last 15 lines of the screen are shown.
@@ -281,10 +279,10 @@ When an agent becomes `blocked`, the thread gets a **"⚠️ <name> · <workspac
 Open the bot from the **Apps** list in Slack's sidebar and click the **Home** tab for a dashboard.
 
 - **Top:** Bridge status (uptime, agent count, slash command, last update) and three buttons:
-  - **[➕ 새 에이전트]** (New agent): opens the `/herdr new` modal.
-  - **[📤 보내기]** (Send): opens the `/herdr send` modal.
-  - **[🔄 새로고침]** (Refresh): redraws immediately.
-- **Below:** Agents by workspace (status emoji · name/pane · kind · status · terminal title). The **[보내기]** (Send) button on an idle/done agent's row opens the send modal with that agent preselected.
+  - **[➕ New Agent]**: opens the `/herdr new` modal.
+  - **[📤 Send]**: opens the `/herdr send` modal.
+  - **[🔄 Refresh]**: redraws immediately.
+- **Below:** Agents by workspace (status emoji · name/pane · kind · status · terminal title). The **[Send]** button on an idle/done agent's row opens the send modal with that agent preselected.
 - **Auto refresh:** Redrawn every time you open Home. After you've opened it once, it also refreshes when agent status changes, batched to at most once every 5 seconds.
 - **Display limit:** Up to 100 blocks per view; the rest are collapsed into "외 N개" (N more).
 - **Owner only:** If another user opens the Home tab, nothing is published, so they never see agent information.

@@ -18,15 +18,15 @@ Slack DM ──(Socket Mode)──> herdr-slackbot 브리지 ──(named pipe)�
 
 ## 스크린샷
 
-**Home 탭:** 봇을 열면 PC의 에이전트가 워크스페이스별로 보입니다. 각 줄에는 상태 이모지 · 이름/pane · 종류 · 상태 · 터미널 제목이 표시됩니다. 위쪽 버튼으로 새 에이전트를 띄우거나 프롬프트를 보낼 수 있고, idle/done인 에이전트는 줄마다 있는 **[보내기]**로 바로 보낼 수 있습니다.
+**Home 탭:** 봇을 열면 PC의 에이전트가 워크스페이스별로 보입니다. 각 줄에는 상태 이모지 · 이름/pane · 종류 · 상태 · 터미널 제목이 표시됩니다. 위쪽 버튼으로 새 에이전트를 띄우거나 프롬프트를 보낼 수 있고, idle/done인 에이전트는 줄마다 있는 **[Send]**로 바로 보낼 수 있습니다.
 
-![Home 탭: 워크스페이스별 에이전트 목록과 새 에이전트 / 보내기 / 새로고침 버튼](docs/images/home-tab.png)
+![Home 탭: 워크스페이스별 에이전트 목록과 New Agent / Send / Refresh 버튼](docs/images/home-tab.png)
 
-**새 에이전트 (`/herdr new`, [➕ 새 에이전트]):** 고른 워크스페이스에 새 탭을 만들고 에이전트를 시작합니다. 모델·effort·권한 모드를 고를 수 있고, 기본값은 Opus · high · auto입니다. 이름을 비우면 `slack-<N>`이 붙습니다.
+**새 에이전트 (`/herdr new`, [➕ New Agent]):** 고른 워크스페이스에 새 탭을 만들고 에이전트를 시작합니다. 모델·effort·권한 모드를 고를 수 있고, 기본값은 Opus · high · auto입니다. 이름을 비우면 `slack-<N>`이 붙습니다.
 
 ![새 에이전트 모달: Model, Effort, Permission mode, Name, Prompt 입력](docs/images/new-agent-modal.png)
 
-**보내기 (`/herdr send`, [📤 보내기]):** 실행 중인 에이전트를 골라 프롬프트를 보냅니다. 에이전트를 고르면 그 에이전트의 마지막 응답이 모달에 표시됩니다. 작업 결과는 에이전트별 DM 스레드로 옵니다.
+**보내기 (`/herdr send`, [📤 Send]):** 실행 중인 에이전트를 골라 프롬프트를 보냅니다. 에이전트를 고르면 그 에이전트의 마지막 응답이 모달에 표시됩니다. 작업 결과는 에이전트별 DM 스레드로 옵니다.
 
 ![보내기 모달: Agent 선택과 Prompt 입력](docs/images/send-modal.png)
 
@@ -147,7 +147,7 @@ manifest에는 아래 설정이 들어 있습니다. 코드에서 실제로 호�
 | 이벤트 | `message.im` (DM 스레드 답장), `app_home_opened` (Home 탭 새로고침) |
 | App Home | Home 탭 켜짐, 메시지 탭 켜짐(입력 가능) |
 | 슬래시 명령 | `.env`의 `SLASH_COMMAND` |
-| Bot scopes | `chat:write` (메시지 전송·수정·ephemeral), `commands`, `im:write` (DM 열기), `im:history` (DM 메시지 수신), `files:write` ([전체 보기] 파일 업로드) |
+| Bot scopes | `chat:write` (메시지 전송·수정·ephemeral), `commands`, `im:write` (DM 열기), `im:history` (DM 메시지 수신), `files:write` ([View full] 파일 업로드) |
 
 #### 이미 만든 앱의 manifest 갱신하기 (예: Home 탭 추가)
 
@@ -239,7 +239,7 @@ notepad "$(herdr plugin config-dir herdr-slackbot)\.env"
 | `/herdr list` | 에이전트 목록 (워크스페이스별, 상태 이모지) |
 | `/herdr new` | 모달로 새 에이전트 시작: 워크스페이스, cwd, 종류(claude/codex), 모델, effort, 권한 모드, 이름, 프롬프트 |
 | `/herdr new <workspace> [name=..] [kind=claude\|codex] [model=..] [effort=..] [mode=..] [cwd=..] <prompt>` | 모달 없이 바로 시작 |
-| `/herdr send` | 모달로 실행 중인 에이전트에 프롬프트 전송. 에이전트를 고르면 Agent와 Prompt 사이에 그 에이전트의 **마지막 응답**(시각·소요 시간 포함)이 표시됩니다. 길면 끝부분 약 2500자만 보여 줍니다. Home 탭의 보내기 버튼에서도 같은 모달이 열립니다. |
+| `/herdr send` | 모달로 실행 중인 에이전트에 프롬프트 전송. 에이전트를 고르면 Agent와 Prompt 사이에 그 에이전트의 **마지막 응답**(시각·소요 시간 포함)이 표시됩니다. 길면 끝부분 약 2500자만 보여 줍니다. Home 탭의 Send 버튼에서도 같은 모달이 열립니다. |
 | `/herdr send <에이전트 이름\|pane id> <prompt>` | 바로 전송 |
 | `/herdr status` | 브리지 상태 |
 | `/herdr pair <code>` | 페어링 모드에서 본인 계정 연결 (위의 **페어링** 참고). 페어링 후에는 거절됩니다. |
@@ -258,7 +258,7 @@ notepad "$(herdr plugin config-dir herdr-slackbot)\.env"
   - 스레드의 🔕 버튼으로 해당 에이전트 알림을 끌 수 있습니다. Slack에서 보낸 작업의 결과는 음소거와 상관없이 옵니다.
 - **결과 본문:**
   - claude는 세션 JSONL에서 마지막 답변을 읽고, 읽지 못하면 화면에서 파싱합니다. codex는 화면 끝부분을 보냅니다.
-  - 3000자가 넘으면 잘라서 보내고, **[전체 보기]** 버튼을 누르면 전체 내용을 `.md` 파일로 올립니다.
+  - 3000자가 넘으면 잘라서 보내고, **[View full]** 버튼을 누르면 전체 내용을 `.md` 파일로 올립니다.
 
 ### 대화 상자에 답하기
 
@@ -267,7 +267,7 @@ notepad "$(herdr plugin config-dir herdr-slackbot)\.env"
 - **지원:** Claude 권한 확인(Bash 등), AskUserQuestion(단일 선택, 복수 선택, 여러 질문, 직접 입력), 계획 승인(ExitPlanMode), 시작할 때의 폴더 신뢰 확인(Claude, Codex), Codex 명령 승인.
 - **버튼:** 선택지마다 `1. Yes` 같은 버튼이 있습니다. "항상 허용 / 다시 묻지 않기" 선택지도 그대로 버튼으로 나옵니다. 복수 선택은 ☐/☑ 버튼으로 켜고 끄고 **[Next →]**로 다음 탭으로 넘어갑니다. 항상 **[Esc]**와 **[Show screen]**(화면 끝 40줄을 스레드에 올림)이 있습니다.
 - **직접 입력:** "Type something." / "Tell Claude what to change" 버튼을 누르면 입력 모달이 열립니다. 스레드에 답장해도 같은 답이 됩니다. 줄바꿈은 공백으로 바뀝니다. 직접 입력 선택지가 없는 질문에 답장하면 "This question needs one of the buttons above."라고 안내합니다.
-- **계획 승인:** 계획 파일(`~\.claude\plans\…md`)을 읽어 본문을 보여 주고, 길면 **[전체 보기]**로 전체를 올립니다.
+- **계획 승인:** 계획 파일(`~\.claude\plans\…md`)을 읽어 본문을 보여 주고, 길면 **[View full]**로 전체를 올립니다.
 - **안전장치:** 버튼을 누르면 먼저 에이전트와 화면을 다시 확인합니다. 그 사이 PC에서 답했거나 질문이 바뀌었으면 키를 보내지 않고 메시지만 갱신합니다. 두 번 눌러도 키는 한 번만 갑니다.
 - **답한 뒤:** 다음 질문이 나오면 같은 메시지가 새 질문으로 바뀝니다. 에이전트가 계속 진행하면 `✅ <선택> — answered from Slack`으로 바뀌고 버튼이 사라집니다. PC에서 답하면 `✅ answered on PC`가 됩니다. 5초 안에 화면이 바뀌지 않으면 버튼을 남겨 두고 "Could not confirm the answer"를 알립니다.
 - **화면을 읽지 못할 때:** `1`–`4`, `↑`, `↓`, Enter, Esc 키패드와 화면 끝 15줄을 보여 줍니다.
@@ -279,10 +279,10 @@ notepad "$(herdr plugin config-dir herdr-slackbot)\.env"
 Slack 왼쪽 **앱** 목록에서 봇을 열고 **홈** 탭을 누르면 대시보드가 나옵니다.
 
 - **맨 위:** 브리지 상태(uptime, 에이전트 수, 슬래시 명령, 갱신 시각)와 버튼 3개가 있습니다.
-  - **[➕ 새 에이전트]**: `/herdr new` 모달이 열립니다.
-  - **[📤 보내기]**: `/herdr send` 모달이 열립니다.
-  - **[🔄 새로고침]**: 화면을 즉시 다시 그립니다.
-- **아래:** 워크스페이스별 에이전트 목록(상태 이모지 · 이름/pane · 종류 · 상태 · 터미널 제목)이 있습니다. idle/done인 에이전트 줄의 **[보내기]**를 누르면, 그 에이전트가 미리 선택된 보내기 모달이 열립니다.
+  - **[➕ New Agent]**: `/herdr new` 모달이 열립니다.
+  - **[📤 Send]**: `/herdr send` 모달이 열립니다.
+  - **[🔄 Refresh]**: 화면을 즉시 다시 그립니다.
+- **아래:** 워크스페이스별 에이전트 목록(상태 이모지 · 이름/pane · 종류 · 상태 · 터미널 제목)이 있습니다. idle/done인 에이전트 줄의 **[Send]**를 누르면, 그 에이전트가 미리 선택된 보내기 모달이 열립니다.
 - **자동 갱신:** 홈을 열 때마다 새로 그립니다. 한 번 연 뒤에는 에이전트 상태가 바뀔 때도 자동으로 갱신됩니다. 몰아서 최소 5초 간격으로 갱신합니다.
 - **표시 한도:** 한 화면에 블록 100개까지 표시되고, 넘치면 "외 N개"로 줄입니다.
 - **소유자 전용:** 다른 사용자가 홈 탭을 열면 아무것도 게시하지 않습니다. 그 사람에게 에이전트 정보는 보이지 않습니다.

@@ -1,4 +1,4 @@
-"""Full result texts kept on disk for the [전체 보기] button (STATE_DIR/results/<id>.md)."""
+"""Full result texts kept on disk for the [View full] button (STATE_DIR/results/<id>.md)."""
 
 from __future__ import annotations
 

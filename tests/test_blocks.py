@@ -159,7 +159,7 @@ def test_result_blocks_truncated_has_full_button_and_limits():
     actions = blocks[-1]
     assert actions["elements"][0]["action_id"] == B.ACTION_SHOW_FULL
     assert actions["elements"][0]["value"] == "abc123"
-    assert actions["elements"][0]["text"]["text"] == "전체 보기"
+    assert actions["elements"][0]["text"]["text"] == "View full"
     # No id -> no button (used to probe truncation first)
     blocks2, _ = B.result_blocks("h", [], body, None)
     assert blocks2[-1]["type"] == "section"
@@ -253,7 +253,7 @@ def test_dialog_blocks_plan_with_full_text_button(transcript):
     long_plan = "# Plan\n" + "\n".join(f"- step {i} with some words" for i in range(300))
     blocks = B.dialog_blocks("coder", "Main", d, "tok", plan_text=long_plan, full_id="rid")
     full = [b for b in _buttons(blocks) if b["action_id"] == B.ACTION_SHOW_FULL]
-    assert full and full[0]["value"] == "rid" and full[0]["text"]["text"] == "전체 보기"
+    assert full and full[0]["value"] == "rid" and full[0]["text"]["text"] == "View full"
     assert all(len(b["text"]["text"]) <= B.SECTION_MAX for b in blocks if b["type"] == "section")
     assert "*Plan*" in json.dumps(blocks)  # markdown converted
     assert "dlg:text:2" in [b["action_id"] for b in _buttons(blocks)]

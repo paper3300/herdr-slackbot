@@ -1239,7 +1239,7 @@ class Bridge:
         when = ""
         if res.at:
             ago = max(0.0, time.time() - res.at)
-            when = "방금" if ago < 60 else f"{int(ago // 60)}분 전" if ago < 3600 else \
+            when = "just now" if ago < 60 else f"{int(ago // 60)} min ago" if ago < 3600 else \
                 time.strftime("%m-%d %H:%M", time.localtime(res.at))
         return B.last_response_blocks(res.text, when, res.duration or "", markdown=res.source != "tail")
 

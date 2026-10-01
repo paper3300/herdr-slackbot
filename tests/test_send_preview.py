@@ -37,9 +37,9 @@ def _fences_balanced(text):
 def test_last_response_blocks_long_text_is_tail_truncated_and_fence_safe():
     body = "# Plan\n" + "\n".join(f"- step {i} **bold** & <tag>" for i in range(400)) + \
            "\n```\n" + "\n".join(f"code {i}" for i in range(300)) + "\n```\n**Shall I continue?**"
-    head, sec = B.last_response_blocks(body, "3분 전", "1m 20s")
+    head, sec = B.last_response_blocks(body, "3 min ago", "1m 20s")
     assert head["block_id"] == B.BLOCK_PREVIEW_HEAD and sec["block_id"] == B.BLOCK_PREVIEW_BODY
-    assert head["elements"][0]["text"] == "마지막 응답 · 3분 전 · 1m 20s"
+    assert head["elements"][0]["text"] == "Last response · 3 min ago · 1m 20s"
     text = sec["text"]["text"]
     assert text.startswith(B.PREVIEW_CUT_MARK) and len(text) <= B.SECTION_MAX
     assert text.rstrip().endswith("*Shall I continue?*")  # the end (conclusion) is kept

@@ -32,12 +32,12 @@ def test_home_view_layout_and_send_buttons():
     assert "uptime 5m" in blocks[1]["elements"][0]["text"] and "/herdr-me" in blocks[1]["elements"][0]["text"]
     actions = blocks[2]["elements"]
     assert [a["action_id"] for a in actions] == [B.ACTION_HOME_NEW, B.ACTION_HOME_SEND, B.ACTION_HOME_REFRESH]
-    assert [a["text"]["text"] for a in actions] == ["➕ 새 에이전트", "📤 보내기", "🔄 새로고침"]
+    assert [a["text"]["text"] for a in actions] == ["➕ New Agent", "📤 Send", "🔄 Refresh"]
     rows = [b for b in blocks[4:] if b["type"] == "section"]
     texts = [r["text"]["text"] for r in rows]
     assert texts[0] == "*Main*" and texts[3] == "*Other*"
     buttons = {r["text"]["text"].split(" · ")[0]: (r.get("accessory") or {}).get("value") for r in rows[1:3] + rows[4:]}
-    assert buttons["🟢 *coder*"] == "coder"  # idle -> [보내기] with the agent's name
+    assert buttons["🟢 *coder*"] == "coder"  # idle -> [Send] with the agent's name
     assert buttons["✅ *w2:p1*"] == "w2:p1"  # done, unnamed -> pane id
     assert buttons["⏳ *w1:p2*"] is None and buttons["⚠️ *stuck*"] is None  # working / blocked: no button
     assert all(r["accessory"]["action_id"] == B.ACTION_HOME_SEND_AGENT for r in rows if r.get("accessory"))
@@ -48,7 +48,7 @@ def test_home_view_respects_the_100_block_limit():
     blocks = B.home_view("H", ["x"], agents, {"w1": "Main"})["blocks"]
     assert len(blocks) == B.HOME_MAX_BLOCKS
     shown = sum(1 for b in blocks if b.get("accessory"))
-    assert blocks[-1]["type"] == "context" and f"외 {150 - shown}개" in blocks[-1]["elements"][0]["text"]
+    assert blocks[-1]["type"] == "context" and f"{150 - shown} more agents" in blocks[-1]["elements"][0]["text"]
 
 
 def test_home_view_error_and_empty():

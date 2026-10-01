@@ -42,12 +42,12 @@ ACTION_SEND_TARGET = "send_target"  # agent select in the send modal (dispatch_a
 BLOCK_PREVIEW_HEAD = "preview_head"
 BLOCK_PREVIEW_BODY = "preview_body"
 PREVIEW_CHARS = 2500
-PREVIEW_CUT_MARK = "…(앞부분 생략)"
-PREVIEW_LOADING = "불러오는 중…"
-PREVIEW_EMPTY = "아직 응답이 없습니다"
-PREVIEW_FAILED = "응답을 불러오지 못했습니다"
-PREVIEW_BUSY = "작업 중입니다 — 아직 응답이 없습니다"
-PREVIEW_PICK = "에이전트를 고르면 마지막 응답이 여기에 표시됩니다"
+PREVIEW_CUT_MARK = "…(earlier part omitted)"
+PREVIEW_LOADING = "Loading…"
+PREVIEW_EMPTY = "No messages yet"
+PREVIEW_FAILED = "Couldn't load the conversation"
+PREVIEW_BUSY = "Working — no answer yet"
+PREVIEW_PICK = "Pick an agent to see the conversation here"
 BLOCK_WS = "ws"
 BLOCK_KIND = "kind"
 BLOCK_PERM = "perm"
@@ -237,14 +237,14 @@ def _button(text: str, action_id: str, value: str | None = None, style: str | No
 def home_view(title: str, status_parts: Sequence[str], agents: Sequence[Mapping] | None,
               workspace_labels: Mapping[str, str], error: str | None = None) -> dict:
     """The App Home tab: status header, action buttons, agents grouped by workspace. Idle/done
-    agents get a [보내기] button (opens the send modal with that agent preselected)."""
+    agents get a [Send] button (opens the send modal with that agent preselected)."""
     blocks: list = [
         {"type": "header", "text": plain(truncate(title, 150))},
         context(" · ".join(escape(p) for p in status_parts if p)),
         {"type": "actions", "block_id": "home_actions", "elements": [
-            _button("➕ 새 에이전트", ACTION_HOME_NEW, style="primary"),
-            _button("📤 보내기", ACTION_HOME_SEND),
-            _button("🔄 새로고침", ACTION_HOME_REFRESH),
+            _button("➕ New Agent", ACTION_HOME_NEW, style="primary"),
+            _button("📤 Send", ACTION_HOME_SEND),
+            _button("🔄 Refresh", ACTION_HOME_REFRESH),
         ]},
         {"type": "divider"},
     ]
@@ -262,14 +262,14 @@ def home_view(title: str, status_parts: Sequence[str], agents: Sequence[Mapping]
             for agent in items:
                 block = section(truncate(agent_line(agent), SECTION_MAX))
                 if (agent.get("agent_status") or "") in SENDABLE_STATUSES:
-                    block["accessory"] = _button("보내기", ACTION_HOME_SEND_AGENT,
+                    block["accessory"] = _button("Send", ACTION_HOME_SEND_AGENT,
                                                  (agent.get("name") or agent.get("pane_id") or "")[:OPTION_VALUE_MAX])
                 rows.append(("agent", block))
         room = HOME_MAX_BLOCKS - len(blocks)
         if len(rows) > room:
             keep = rows[:room - 1]
             hidden = sum(1 for kind, _ in rows[room - 1:] if kind == "agent")
-            rows = keep + [("more", context(f"외 {hidden}개 에이전트 (목록: `list` 명령)"))]
+            rows = keep + [("more", context(f"{hidden} more agents (see the `list` command)"))]
         blocks.extend(block for _, block in rows)
     return {"type": "home", "blocks": blocks}
 
@@ -437,7 +437,7 @@ def last_response_blocks(text: str | None, when: str = "", duration: str = "", m
     text (tail-truncated to fit Slack's 3000-char section limit), or one italic note line."""
     if note or not (text or "").strip():
         return [context(f"_{escape(note or PREVIEW_EMPTY)}_") | {"block_id": BLOCK_PREVIEW_HEAD}]
-    header = " · ".join(p for p in ("마지막 응답", when, duration) if p)
+    header = " · ".join(p for p in ("Last response", when, duration) if p)
     limit = PREVIEW_CHARS
     while True:
         excerpt, cut = tail_excerpt(text.strip("\n"), limit)
@@ -598,7 +598,7 @@ def dialog_blocks(name: str, workspace_label: str, dialog: Dialog | None, token:
         blocks.append(section("\n".join(parts + [body or "_(empty plan)_"])))
         if truncated and full_id:
             blocks.append({"type": "actions", "block_id": "dialog_full", "elements": [
-                _button("전체 보기", ACTION_SHOW_FULL, full_id)]})
+                _button("View full", ACTION_SHOW_FULL, full_id)]})
         parts = []
     elif dialog.body:
         if dialog.kind in (KIND_TRUST, KIND_QUESTION_REVIEW):
@@ -715,7 +715,7 @@ def parse_dialog_text_view(view: Mapping) -> tuple[str | None, int | None, str, 
 
 def result_blocks(header: str, context_parts: Sequence[str], body: str, result_id: str | None,
                   recap: str | None = None, limit: int = SECTION_MAX, markdown: bool = True) -> tuple[list, bool]:
-    """Result message. Returns (blocks, truncated). A truncated body gets a [전체 보기] button."""
+    """Result message. Returns (blocks, truncated). A truncated body gets a [View full] button."""
     converted = to_mrkdwn(body) if markdown else "```\n" + defuse_fences(escape(body)) + "\n```"
     text, truncated = truncate_text(converted, min(limit, SECTION_MAX))
     if truncated and text.count("```") % 2 == 1:
@@ -732,7 +732,7 @@ def result_blocks(header: str, context_parts: Sequence[str], body: str, result_i
         blocks.append({
             "type": "actions",
             "block_id": "result_ctl",
-            "elements": [{"type": "button", "action_id": ACTION_SHOW_FULL, "text": plain("전체 보기"),
+            "elements": [{"type": "button", "action_id": ACTION_SHOW_FULL, "text": plain("View full"),
                           "value": result_id}],
         })
     return blocks, truncated
