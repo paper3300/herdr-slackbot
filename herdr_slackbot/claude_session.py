@@ -334,7 +334,7 @@ def _texts(entry: dict) -> list[str]:
 
 def _prompt_text(blocks: list) -> str:
     """Visible text of prompt blocks: closed system-reminder blocks and command bookkeeping removed,
-    images as `[image]`. Falls back to the raw text if nothing is left (stripping never hides a turn)."""
+    images as `[image]`. If nothing is left, the text with only the reminders removed."""
     parts, raw = [], []
     for block in blocks:
         if not isinstance(block, dict):
@@ -344,20 +344,21 @@ def _prompt_text(blocks: list) -> str:
             parts.append("[image]")
             raw.append("[image]")
         elif kind == "text":
-            original = str(block.get("text", ""))
-            raw.append(original.strip())
-            text = _REMINDER_RE.sub("", original).strip()
+            text = _REMINDER_RE.sub("", str(block.get("text", ""))).strip()
+            raw.append(text)
             if text and not text.startswith(_COMMAND_PREFIXES):
                 parts.append(text)
     return "\n\n".join(parts) or "\n\n".join(r for r in raw if r)
 
 
-def _reminder_only(entry: dict) -> bool:
-    """Every block is text made solely of closed <system-reminder> blocks (an injected note)."""
-    blocks = _blocks(entry)
-    return bool(blocks) and all(
-        b.get("type") == "text" and _REMINDER_RE.search(str(b.get("text", "")))
-        and not _REMINDER_RE.sub("", str(b.get("text", ""))).strip() for b in blocks)
+def _bookkeeping_only(entry: dict) -> bool:
+    """No image, and every text block is empty or command bookkeeping once closed <system-reminder>
+    blocks are removed (an injected note, a reminder + `<command-...>` record)."""
+    blocks = [b for b in _blocks(entry) if b.get("type") in ("text", "image")]
+    if any(b.get("type") == "image" for b in blocks):
+        return False
+    texts = [_REMINDER_RE.sub("", str(b.get("text", ""))).strip() for b in blocks]
+    return all(not x or x.startswith(_COMMAND_PREFIXES) for x in texts)
 
 
 def _queued_prompt(entry: dict) -> list | None:
@@ -403,7 +404,7 @@ def _turn_start(index: int, entry: dict) -> _Start | None:
     queued = _queued_prompt(entry)
     if queued is not None:
         return _Start(index, "user", _prompt_text(queued))
-    if not _is_prompt(entry) or _reminder_only(entry) or _is_bash_mode(entry):
+    if not _is_prompt(entry) or _bookkeeping_only(entry) or _is_bash_mode(entry):
         return None
     event = _event_text(entry)
     if event is not None:
@@ -435,6 +436,11 @@ def _final_text(turn: list[dict], last: bool) -> tuple[str, float | None] | None
     return (text, _ts(final[-1])) if text else None
 
 
+def _parent_of(entry: dict):
+    parent = entry.get("parentUuid")
+    return entry.get("logicalParentUuid") if parent is None else parent
+
+
 def _live_branch(entries: list[dict], starts: list[_Start], tail_cut: bool) -> set[str] | None:
     """uuids on the parentUuid (logicalParentUuid where parentUuid is null) chain of the latest
     user/assistant record: the live branch after a rewind or an edited prompt. None (= linear order)
@@ -453,10 +459,7 @@ def _live_branch(entries: list[dict], starts: list[_Start], tail_cut: bool) -> s
         if uuid in on:
             return None  # cycle
         on.add(uuid)
-        entry = entries[index[uuid]]
-        parent = entry.get("parentUuid")
-        if parent is None:
-            parent = entry.get("logicalParentUuid")
+        parent = _parent_of(entries[index[uuid]])
         if parent is None:
             return on  # the root
         if not isinstance(parent, str) or parent not in index:
@@ -466,19 +469,51 @@ def _live_branch(entries: list[dict], starts: list[_Start], tail_cut: bool) -> s
         uuid = parent
 
 
+def _forks_off(uuid: str, entries: list[dict], index: dict[str, int], live: set[str],
+               memo: dict[str, bool]) -> bool:
+    """True when the ancestors of `uuid` meet the live chain (a real fork: rewind / edited prompt).
+    A separate parentless root, a parent missing from the tail or a cycle gives False."""
+    path, seen = [], set()
+    result = False
+    while uuid not in live:
+        if uuid in memo:
+            result = memo[uuid]
+            break
+        if uuid in seen or uuid not in index:
+            break  # cycle / outside the tail: unknown
+        seen.add(uuid)
+        path.append(uuid)
+        parent = _parent_of(entries[index[uuid]])
+        if not isinstance(parent, str):
+            break  # another root
+        uuid = parent
+    else:
+        result = True
+    for x in path:
+        memo[x] = result
+    return result
+
+
 def _mark_abandoned(entries: list[dict], starts: list[_Start], live: set[str]) -> None:
-    """Typed prompts off the live branch are hidden with their answer. Their records still end the
-    previous turn, so an abandoned answer never shows up under a live prompt. Queued prompts and
-    events are always kept (their place in the tree is not relied on)."""
+    """Typed prompts on a branch that forks off the live chain are hidden with their answer. Their
+    records still end the previous turn, so an abandoned answer never shows up under a live prompt.
+    Prompts on a separate root (or whose ancestry leaves the tail) stay in linear order. Queued
+    prompts and events are always kept (their place in the tree is not relied on)."""
+    index = {e["uuid"]: i for i, e in enumerate(entries) if isinstance(e.get("uuid"), str)}
+    memo: dict[str, bool] = {}
     for start in starts:
         entry = entries[start.index]
-        if start.role == "user" and entry.get("type") == "user" and entry["uuid"] not in live:
+        if start.role == "user" and entry.get("type") == "user" and entry["uuid"] not in live                 and _forks_off(entry["uuid"], entries, index, live, memo):
             start.show_head = start.show_answer = False
 
 
 def _mark_duplicates(entries: list[dict], starts: list[_Start]) -> None:
     """A queued prompt that also exists as a "user" record (same text, linked by source_uuid): the
-    later copy is not shown again; its answer still is."""
+    later copy is not shown again; its answer still is.
+
+    Speculative: in real transcripts `attachment.source_uuid` points at `queue-operation` records,
+    not at any record's uuid, and no user record carries `source_uuid`/`sourceUuid`, so this link has
+    never been seen to match (docs/review/history-en-recheck.md O1). Kept as a harmless guard."""
     seen: dict[str, str] = {}
     for start in starts:
         if start.role != "user" or not start.show_head:

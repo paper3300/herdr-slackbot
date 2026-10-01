@@ -414,3 +414,44 @@ def test_n4_english_readme_has_no_korean_ui_text():
     readme = (Path(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
     hangul = set(re.findall("[가-힣]+", readme))
     assert hangul <= {"한국어"}, hangul  # only the language link
+
+
+# --- re-check fixes (docs/review/history-en-recheck.md) --------------------------------------------
+
+def test_o2_reminder_plus_command_bookkeeping_is_not_a_prompt():
+    entries = [user("q", 1), assistant("m1", [text("a")], "end_turn", 2),
+               user("<system-reminder>r</system-reminder><command-name>/foo</command-name>", 3),
+               user([text("<system-reminder>r</system-reminder>"), text("<local-command-stdout>x</local-command-stdout>")], 4)]
+    assert _pairs(entries) == [("user", "q"), ("assistant", "a")]  # the answer stays with "q"
+    kept = [user([text("<system-reminder>r</system-reminder>"), {"type": "image", "source": {}}], 1)]
+    assert _pairs(kept) == [("user", "[image]")]
+
+
+def test_o2_raw_text_fallback_still_strips_reminders():
+    from herdr_slackbot.claude_session import _prompt_text
+    blocks = [text("<system-reminder>secret note</system-reminder><command-name>/foo</command-name>")]
+    assert _prompt_text(blocks) == "<command-name>/foo</command-name>"
+    entries = [queued("<system-reminder>secret note</system-reminder><command-name>/foo</command-name>", 1)]
+    assert _pairs(entries) == [("user", "<command-name>/foo</command-name>")]
+
+
+def test_o3_prompts_on_a_separate_root_stay_in_linear_order():
+    entries = [user("P1", 1, uuid="p1", parentUuid=None),
+               assistant("a1", [text("A1")], "end_turn", 2, uuid="a1", parentUuid="p1"),
+               {"type": "attachment", "uuid": "h1", "parentUuid": None, "attachment": {"type": "hook_success"}},
+               user("P2", 3, uuid="p2", parentUuid="h1"),
+               assistant("a2", [text("A2")], "end_turn", 4, uuid="a2", parentUuid="p2")]
+    assert _pairs(entries) == [("user", "P1"), ("assistant", "A1"), ("user", "P2"), ("assistant", "A2")]
+
+
+def test_o3_only_real_forks_are_hidden():
+    # p1 -> a1 -> {p2 -> a2 (fork, hidden), p3 -> a3 (live)}; x1 has a parent outside the tail: kept
+    rewound = _rewound()
+    entries = rewound[:4] + [user("X", 5, uuid="x1", parentUuid="outside")] + rewound[4:]
+    assert [t for _, t in _pairs(entries)] == ["P1", "A1", "X", "P2 new", "A2 new"]
+    # deeper fork: the abandoned branch has two prompts below the common ancestor
+    deep = _rewound()[:4] + [user("P3 old", 5, uuid="p4", parentUuid="a2"),
+                             assistant("a4", [text("A3 old")], "end_turn", 6, uuid="a4", parentUuid="p4"),
+                             user("P2 new", 7, uuid="p3", parentUuid="a1"),
+                             assistant("a3", [text("A2 new")], "end_turn", 8, uuid="a3", parentUuid="p3")]
+    assert _pairs(deep) == LIVE
