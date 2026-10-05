@@ -9,8 +9,6 @@
 
 **Control the Claude Code / Codex agents running on your PC from Slack.** Get a DM when an agent finishes, answer its permission prompt with a button, and send it the next prompt, all from your phone.
 
-<!-- Demo GIF goes here: ![Demo](docs/images/demo.gif) -->
-
 ## Why
 
 Coding agents stop and wait all the time: a permission prompt, a question, a plan to approve. If you've stepped away from your desk, they sit idle until you come back. herdr-slackbot is a [Herdr](https://herdr.dev) plugin that connects those agents to a Slack bot DM, so you can keep them moving from anywhere.
